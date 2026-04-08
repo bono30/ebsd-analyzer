@@ -440,156 +440,197 @@ def plot_ipf_3d_cube(phi1_arr, Phi_arr, phi2_arr,
                      title="IPF Color Map — 3D",
                      phase_label="Ferrite"):
     """
-    Generate a 3-D cube figure with three IPF-colored faces (X, Y, Z planes),
-    similar to the reference image showing grain microstructure in 3-D.
+    3-D isometric cube with three IPF-colored faces.
+    Renders each face by drawing individual parallelogram patches per pixel
+    at a downsampled resolution — fast and correct for any grid size.
 
-    The three visible faces of the cube correspond to:
-      - Top  face (XY plane) → IPF colors for Z axis
-      - Front face (XZ plane) → IPF colors for Y axis
-      - Right face (YZ plane) → IPF colors for X axis
-
-    Parameters
-    ----------
-    phi1_arr, Phi_arr, phi2_arr : Euler angles (degrees), length N
-    x_pos, y_pos : pixel X and Y positions (µm)
-    step_x, step_y : grid step sizes (µm); estimated if None
-    title : figure title
-    phase_label : label for the legend triangle
-
-    Returns
-    -------
-    fig : matplotlib Figure
+    Faces:
+      - Top   (XY plane, viewed from above) → IPF-Z  [light shading]
+      - Front (XZ plane, y = max)           → IPF-Y  [medium shading]
+      - Right (YZ plane, x = max)           → IPF-X  [dark shading]
     """
+    from matplotlib.collections import PolyCollection
+
     phi1 = np.asarray(phi1_arr, float)
     Phi  = np.asarray(Phi_arr,  float)
     phi2 = np.asarray(phi2_arr, float)
     xp   = np.asarray(x_pos, float)
     yp   = np.asarray(y_pos, float)
 
-    # ── Rebuild pixel grid ────────────────────────────────────────────────────
-    valid = np.isfinite(phi1) & np.isfinite(Phi) & np.isfinite(phi2) \
-          & np.isfinite(xp)  & np.isfinite(yp)
+    # ── Grid ──────────────────────────────────────────────────────────────────
+    valid = (np.isfinite(phi1) & np.isfinite(Phi) & np.isfinite(phi2)
+             & np.isfinite(xp) & np.isfinite(yp))
     phi1, Phi, phi2 = phi1[valid], Phi[valid], phi2[valid]
     xp, yp = xp[valid], yp[valid]
 
     ux = np.sort(np.unique(xp))
     uy = np.sort(np.unique(yp))
-    sx = float(np.median(np.diff(ux))) if step_x is None and len(ux) > 1 else (step_x or 1.0)
-    sy = float(np.median(np.diff(uy))) if step_y is None and len(uy) > 1 else (step_y or 1.0)
+    sx = float(np.median(np.diff(ux))) if step_x is None and len(ux)>1 else (step_x or 1.)
+    sy = float(np.median(np.diff(uy))) if step_y is None and len(uy)>1 else (step_y or 1.)
 
     xi = np.round((xp - xp.min()) / sx).astype(int)
     yi = np.round((yp - yp.min()) / sy).astype(int)
     ncols = xi.max() + 1
     nrows = yi.max() + 1
 
-    # ── Compute IPF colors for all three axes ─────────────────────────────────
-    rgb_z = compute_ipf_colormap(phi1, Phi, phi2, "Z")   # top face
-    rgb_y = compute_ipf_colormap(phi1, Phi, phi2, "Y")   # front face
-    rgb_x = compute_ipf_colormap(phi1, Phi, phi2, "X")   # right face
+    # Downsample — target max 60 cells/side for fast PolyCollection
+    MAX_C = 60
+    ds = max(1, max(nrows, ncols) // MAX_C)
+    if ds > 1:
+        keep = (xi % ds == 0) & (yi % ds == 0)
+        phi1, Phi, phi2 = phi1[keep], Phi[keep], phi2[keep]
+        xi = xi[keep] // ds; yi = yi[keep] // ds
+        ncols = xi.max() + 1; nrows = yi.max() + 1
 
-    def make_image(rgb, row_idx, col_idx, nr, nc):
-        """Place N RGB values on a (nr, nc, 3) image grid."""
-        img = np.ones((nr, nc, 3), dtype=float) * 0.9
-        img[row_idx, col_idx] = rgb
-        return img
+    W, H = ncols, nrows   # W=X cols, H=Y rows
 
-    img_z = make_image(rgb_z, yi, xi, nrows, ncols)   # top  (rows=Y, cols=X)
-    img_y = make_image(rgb_y, yi, xi, nrows, ncols)   # front (rows=Y, cols=X)
-    img_x = make_image(rgb_x, yi, xi, nrows, ncols)   # right (rows=Y, cols=X)
+    # ── IPF colors ────────────────────────────────────────────────────────────
+    def make_grid(rgb, ri, ci, nr, nc):
+        grid = np.full((nr, nc, 3), 0.82, dtype=np.float32)
+        grid[ri, ci] = np.clip(rgb, 0, 1).astype(np.float32)
+        return grid
 
-    # ── Build 3-D figure ──────────────────────────────────────────────────────
+    grid_z = make_grid(compute_ipf_colormap(phi1,Phi,phi2,"Z"), yi,xi,H,W)
+    grid_y = make_grid(compute_ipf_colormap(phi1,Phi,phi2,"Y"), yi,xi,H,W)
+    grid_x = make_grid(compute_ipf_colormap(phi1,Phi,phi2,"X"), yi,xi,H,W)
+
+    # ── Isometric projection ──────────────────────────────────────────────────
+    # Unit vectors for one cell:
+    #   moving +1 in X → shift ex in canvas
+    #   moving +1 in Y → shift ey in canvas
+    #   moving +1 in Z → shift ez in canvas
+    ang = np.radians(30)
+    ex = np.array([ np.cos(ang), -np.sin(ang)])   # +X → right-down
+    ey = np.array([-np.cos(ang), -np.sin(ang)])   # +Y → left-down
+    ez = np.array([0.0,           1.0          ])  # +Z → up
+
+    def P(ix, iy, iz):
+        return ix*ex + iy*ey + iz*ez
+
+    # ── Build polygon lists for each face ────────────────────────────────────
+    def face_polys(grid, face):
+        """
+        Build (verts_list, colors_list) for all cells on a face.
+        face: 'top' | 'front' | 'right'
+        """
+        verts = []
+        colors = []
+        nr, nc = grid.shape[:2]
+        for row in range(nr):
+            for col in range(nc):
+                c = grid[row, col]   # RGB
+                if face == 'top':
+                    # Top face: X=col, Y=row, Z=H (constant)
+                    # Cell corners: (col,row,H), (col+1,row,H), (col+1,row+1,H), (col,row+1,H)
+                    z = H
+                    bl = P(col,   row,   z)
+                    br = P(col+1, row,   z)
+                    tr = P(col+1, row+1, z)
+                    tl = P(col,   row+1, z)
+                elif face == 'front':
+                    # Front face: X=col, Y=H (constant), Z=row
+                    y = H
+                    bl = P(col,   y, row  )
+                    br = P(col+1, y, row  )
+                    tr = P(col+1, y, row+1)
+                    tl = P(col,   y, row+1)
+                else:  # right
+                    # Right face: X=W (constant), Y=col, Z=row
+                    x = W
+                    bl = P(x, col,   row  )
+                    br = P(x, col+1, row  )
+                    tr = P(x, col+1, row+1)
+                    tl = P(x, col,   row+1)
+                verts.append([bl, br, tr, tl])
+                colors.append(c)
+        return verts, colors
+
+    top_v,   top_c   = face_polys(grid_z,            'top')
+    front_v, front_c = face_polys(grid_y[::-1, :],   'front')  # flip: row0=z_max
+    right_v, right_c = face_polys(grid_x[::-1, :],   'right')
+
+    # Apply lighting (multiplicative shading per face)
+    top_c   = [np.clip(np.array(c)*1.00, 0,1) for c in top_c]
+    front_c = [np.clip(np.array(c)*0.80, 0,1) for c in front_c]
+    right_c = [np.clip(np.array(c)*0.62, 0,1) for c in right_c]
+
+    # ── Figure ────────────────────────────────────────────────────────────────
     fig = plt.figure(figsize=(9, 8))
-    ax3 = fig.add_axes([0.0, 0.05, 0.78, 0.90], projection="3d")
+    ax  = fig.add_axes([0.0, 0.08, 0.72, 0.88])
+    ax.set_aspect("equal"); ax.axis("off")
+    fig.patch.set_facecolor("white")
 
-    W = ncols - 1  # width  (X direction)
-    H = nrows - 1  # height (Y direction)
-    D = max(W, H)  # depth  (Z direction, use same scale for aesthetics)
-
-    # ── Top face (Z plane): IPF-Z ─────────────────────────────────────────────
-    # Surface at z = D; x varies 0→W, y varies 0→H
-    xs_t = np.linspace(0, W, ncols)
-    ys_t = np.linspace(0, H, nrows)
-    XS, YS = np.meshgrid(xs_t, ys_t)
-    ZS = np.full_like(XS, D)
-
-    # imshow → face colors need (nr-1, nc-1, 4) or use plot_surface with facecolors
-    # We use plot_surface with facecolors
-    fc_top = img_z                          # (nrows, ncols, 3)
-    # plot_surface facecolors expects (nrows-1, ncols-1, 4) — use subsampled RGBA
-    def _to_face_rgba(img):
-        """Down-sample image to face-centre colors: (nr-1, nc-1, 4)."""
-        r = (img[:-1,:-1,:] + img[1:,:-1,:] + img[:-1,1:,:] + img[1:,1:,:]) / 4
-        a = np.ones((*r.shape[:2], 1))
-        return np.concatenate([r, a], axis=-1)
-
-    ax3.plot_surface(XS, YS, ZS,
-                     facecolors=_to_face_rgba(fc_top),
-                     rstride=1, cstride=1,
-                     linewidth=0, antialiased=False, shade=False)
-
-    # ── Front face (Y=0 plane): IPF-Y ─────────────────────────────────────────
-    xs_f = np.linspace(0, W, ncols)
-    zs_f = np.linspace(0, D, nrows)
-    XF, ZF = np.meshgrid(xs_f, zs_f)
-    YF = np.zeros_like(XF)
-
-    # Front face: columns=X, rows=Z (bottom of map = z=0, top = z=D)
-    # Flip Y image vertically so "bottom" of map is at z=0
-    fc_front = img_y[::-1, :, :]
-    ax3.plot_surface(XF, YF, ZF,
-                     facecolors=_to_face_rgba(fc_front),
-                     rstride=1, cstride=1,
-                     linewidth=0, antialiased=False, shade=False)
-
-    # ── Right face (X=W plane): IPF-X ─────────────────────────────────────────
-    ys_r = np.linspace(0, H, nrows)
-    zs_r = np.linspace(0, D, nrows)
-    YR, ZR = np.meshgrid(ys_r, zs_r)
-    XR = np.full_like(YR, W)
-
-    fc_right = img_x[::-1, :, :]
-    ax3.plot_surface(XR, YR, ZR,
-                     facecolors=_to_face_rgba(fc_right),
-                     rstride=1, cstride=1,
-                     linewidth=0, antialiased=False, shade=False)
-
-    # ── Axes styling ──────────────────────────────────────────────────────────
-    ax3.set_xlim(0, W); ax3.set_ylim(0, H); ax3.set_zlim(0, D)
-    ax3.set_xlabel(f"X  ({W*sx:.1f} µm)", fontsize=9, labelpad=4)
-    ax3.set_ylabel(f"Y  ({H*sy:.1f} µm)", fontsize=9, labelpad=4)
-    ax3.set_zlabel(f"Z", fontsize=9, labelpad=4)
-    ax3.set_title(title, fontsize=12, fontweight="bold", pad=10)
-    ax3.view_init(elev=28, azim=-50)
-
-    # ── Add grey border edges ─────────────────────────────────────────────────
-    edge_kw = dict(color="grey", lw=0.8, alpha=0.7)
-    # Bottom rectangle
-    for xs, ys, zs in [
-        ([0,W,W,0,0],[0,0,H,H,0],[0,0,0,0,0]),
-        ([0,W,W,0,0],[0,0,H,H,0],[D,D,D,D,D]),
-        ([0,0],[0,0],[0,D]), ([W,W],[0,0],[0,D]),
-        ([W,W],[H,H],[0,D]), ([0,0],[H,H],[0,D]),
+    # Draw faces back-to-front
+    for verts, colors, zo in [
+        (top_v,   top_c,   3),
+        (front_v, front_c, 2),
+        (right_v, right_c, 2),
     ]:
-        ax3.plot(xs, ys, zs, **edge_kw)
+        pc = PolyCollection(verts, facecolors=colors, edgecolors="none", zorder=zo)
+        ax.add_collection(pc)
 
-    # ── Legend triangle (inset axes) ─────────────────────────────────────────
-    ax_leg = fig.add_axes([0.78, 0.55, 0.20, 0.22])
+    # ── Cube outline edges ────────────────────────────────────────────────────
+    ekw = dict(color="black", lw=0.8, zorder=6)
+    corners = {k: P(*v) for k, v in {
+        "OOO":(0,0,0),"WOO":(W,0,0),"OHO":(0,H,0),"WHO":(W,H,0),
+        "OO1":(0,0,H),"WO1":(W,0,H),"OH1":(0,H,H),"WH1":(W,H,H),
+    }.items()}
+    for a,b in [("OOO","WOO"),("OOO","OHO"),("OOO","OO1"),
+                ("WOO","WHO"),("WOO","WO1"),
+                ("OHO","WHO"),("OHO","OH1"),
+                ("OO1","WO1"),("OO1","OH1"),
+                ("WHO","WH1"),("WO1","WH1"),("OH1","WH1"),("WH1","WO1")]:
+        p1,p2 = corners[a],corners[b]
+        ax.plot([p1[0],p2[0]],[p1[1],p2[1]],**ekw)
+
+    # ── Axis labels ───────────────────────────────────────────────────────────
+    bbx = dict(boxstyle="round,pad=0.25", fc="white", ec="#999", alpha=0.9, lw=0.5)
+    lkw = dict(fontsize=9, fontweight="bold", ha="center", va="center", zorder=10, bbox=bbx)
+
+    mX = (corners["OHO"]+corners["WHO"])/2
+    ax.text(mX[0], mX[1]-0.40, f"X  ({W*sx*ds:.0f} µm)", color="darkred",  **lkw)
+    mY = (corners["OOO"]+corners["OHO"])/2
+    ax.text(mY[0]-0.55, mY[1], f"Y  ({H*sy*ds:.0f} µm)", color="#006600", **lkw)
+    mZ = (corners["OHO"]+corners["OH1"])/2
+    ax.text(mZ[0]-0.35, mZ[1], "Z",                      color="navy",    **lkw)
+
+    # Face labels
+    flkw = dict(fontsize=8, ha="center", va="center", zorder=10, color="black",
+                fontweight="bold",
+                bbox=dict(boxstyle="round,pad=0.2", fc="white", alpha=0.72, lw=0))
+    tc = (corners["OO1"]+corners["WO1"]+corners["WH1"]+corners["OH1"])/4
+    ax.text(tc[0], tc[1], "IPF // Z", **flkw)
+    fc = (corners["OHO"]+corners["WHO"]+corners["WH1"]+corners["OH1"])/4
+    ax.text(fc[0], fc[1], "IPF // Y", **flkw)
+    rc = (corners["WHO"]+corners["WOO"]+corners["WO1"]+corners["WH1"])/4
+    ax.text(rc[0], rc[1], "IPF // X", **flkw)
+
+    ax.set_title(title, fontsize=12, fontweight="bold", pad=10)
+
+    # Auto limits
+    all_pts = np.array(list(corners.values()))
+    mg = 0.6
+    ax.set_xlim(all_pts[:,0].min()-mg, all_pts[:,0].max()+mg)
+    ax.set_ylim(all_pts[:,1].min()-mg*3.5, all_pts[:,1].max()+mg)
+
+    # ── Legend triangle ───────────────────────────────────────────────────────
+    ax_leg = fig.add_axes([0.72, 0.60, 0.25, 0.23])
     plot_ipf_legend(ax=ax_leg, title=f"{phase_label}\n001", fontsize=8)
 
-    # ── Sample reference frame arrow ─────────────────────────────────────────
-    ax_ref = fig.add_axes([0.78, 0.30, 0.20, 0.18])
-    ax_ref.annotate("", xy=(0.7, 0.5), xytext=(0.0, 0.5),
-                    arrowprops=dict(arrowstyle="-|>", color="black", lw=1.2))
-    ax_ref.annotate("", xy=(0.5, 0.95), xytext=(0.5, 0.2),
-                    arrowprops=dict(arrowstyle="-|>", color="black", lw=1.2))
-    ax_ref.annotate("", xy=(0.15, 0.15), xytext=(0.5, 0.5),
-                    arrowprops=dict(arrowstyle="-|>", color="black", lw=1.2))
-    ax_ref.text(0.72, 0.46, "X", fontsize=9, fontweight="bold", ha="left")
-    ax_ref.text(0.50, 0.98, "Y", fontsize=9, fontweight="bold", ha="center", va="bottom")
-    ax_ref.text(0.10, 0.10, "Z", fontsize=9, fontweight="bold", ha="right")
-    ax_ref.set_xlim(0, 1); ax_ref.set_ylim(0, 1); ax_ref.axis("off")
-    ax_ref.set_title("Z = Rolling direction", fontsize=7, pad=2)
+    # ── Reference frame ───────────────────────────────────────────────────────
+    ax_ref = fig.add_axes([0.72, 0.35, 0.25, 0.20])
+    for tail, head, lbl, col in [
+        ((0.45,0.45),(0.92,0.45), "X", "darkred"),
+        ((0.45,0.45),(0.45,0.92), "Y", "#006600"),
+        ((0.45,0.45),(0.08,0.08), "Z", "navy"),
+    ]:
+        ax_ref.annotate("", xy=head, xytext=tail,
+                        arrowprops=dict(arrowstyle="-|>", color=col, lw=1.5))
+        off = (np.array(head)-np.array(tail))*0.22
+        ax_ref.text(head[0]+off[0], head[1]+off[1], lbl,
+                    fontsize=10, fontweight="bold", color=col,
+                    ha="center", va="center")
+    ax_ref.set_xlim(-0.1,1.2); ax_ref.set_ylim(-0.1,1.2); ax_ref.axis("off")
+    ax_ref.set_title("Sample axes", fontsize=7, pad=2)
 
-    fig.patch.set_facecolor("white")
     return fig
-
