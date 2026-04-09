@@ -440,14 +440,8 @@ def plot_ipf_3d_cube(phi1_arr, Phi_arr, phi2_arr,
                      title="IPF Color Map — 3D",
                      phase_label="Ferrite"):
     """
-    3-D isometric cube with three clean IPF-colored faces.
-    Each face is rendered as a smooth parallelogram via scipy.ndimage.map_coordinates
-    — no polygon artifacts, no diagonal lines, fully continuous color.
-
-    Isometric convention (screen coords: x=right, y=down):
-      ex  = (+cos30, +sin30)   →  X-axis goes right-down
-      ey  = (-cos30, +sin30)   →  Y-axis goes left-down  (depth)
-      ez  = (0,      -1     )  →  Z-axis goes straight up
+    3-D isometric cube — clean IPF faces, no internal diagonal lines,
+    proportional faces, scale bars per face, axis labels outside the cube.
     """
     from scipy.ndimage import map_coordinates
 
@@ -481,7 +475,7 @@ def plot_ipf_3d_cube(phi1_arr, Phi_arr, phi2_arr,
         xi = xi[keep] // ds; yi = yi[keep] // ds
         ncols = xi.max() + 1; nrows = yi.max() + 1
 
-    W, H = ncols, nrows
+    W, H = ncols, nrows   # W = X cols, H = Y rows
 
     # ── IPF images ────────────────────────────────────────────────────────────
     def make_img(rgb, ri, ci, nr, nc):
@@ -493,142 +487,263 @@ def plot_ipf_3d_cube(phi1_arr, Phi_arr, phi2_arr,
     img_y = make_img(compute_ipf_colormap(phi1,Phi,phi2,"Y"), yi,xi,H,W)
     img_x = make_img(compute_ipf_colormap(phi1,Phi,phi2,"X"), yi,xi,H,W)
 
-    # ── Isometric geometry (all in canvas pixels, y=down) ─────────────────────
-    SCALE = 4   # canvas pixels per map pixel
-    FW = W * SCALE   # face width  (X direction)
-    FH = H * SCALE   # face height (Z direction, vertical)
-    FD = H * SCALE   # face depth  (Y direction, same as height for square look)
+    # ── Isometric geometry ────────────────────────────────────────────────────
+    # Canvas pixels per map-pixel
+    SCALE = 4
+    FW = W * SCALE    # face width  (X direction, horizontal)
+    FH = H * SCALE    # face height (Y direction, depth)
+    FZ = H * SCALE    # face height (Z direction, vertical) — use H for square faces
+    # NOTE: all three faces share the same Z height. X-face width = FH (depth),
+    # front-face width = FW (X). This makes the cube proportional.
 
-    # Unit isometric vectors (canvas pixels, y points DOWN)
     a30 = np.radians(30)
-    ex = np.array([ np.cos(a30),  np.sin(a30)]) * SCALE   # +1 map-col  in X
-    ey = np.array([-np.cos(a30),  np.sin(a30)]) * SCALE   # +1 map-row  in Y
-    ez = np.array([ 0.0,         -1.0         ]) * SCALE  # +1 Z unit upward
+    # Per-pixel isometric unit vectors (canvas pixels, y=down)
+    # Moving +1 in X → right-down
+    # Moving +1 in Y → left-down (depth)
+    # Moving +1 in Z → straight up
+    uX = np.array([ np.cos(a30),  np.sin(a30)]) * SCALE
+    uY = np.array([-np.cos(a30),  np.sin(a30)]) * SCALE
+    uZ = np.array([ 0.0,         -1.0         ]) * SCALE
 
-    # The 8 cube corners in canvas coords.
-    # We define the bottom-left-front corner as origin O, then compute all corners.
-    # After computing, shift everything so min_x=PAD, min_y=PAD.
-    PAD = 20
+    def P(nx, ny, nz):
+        """Cube coordinate (nx cols, ny rows, nz Z-units) → canvas pixel."""
+        return nx*uX + ny*uY + nz*uZ
 
-    def corner(ix, iy, iz):
-        return ix*ex + iy*ey + iz*ez
+    # Raw corners
+    raw_corners = {
+        "BLF": P(0,H,0), "BRF": P(W,H,0), "BLB": P(0,0,0), "BRB": P(W,0,0),
+        "TLF": P(0,H,H), "TRF": P(W,H,H), "TLB": P(0,0,H), "TRB": P(W,0,H),
+    }
+    all_pts = np.array(list(raw_corners.values()))
+    PAD = 24
+    shift = np.array([PAD - all_pts[:,0].min(), PAD - all_pts[:,1].min()])
+    C = {k: v + shift for k, v in raw_corners.items()}
 
-    # Raw corners (before padding shift)
-    raw = {k: corner(*v) for k, v in {
-        "BLF":(0,H,0),"BRF":(W,H,0),"BLB":(0,0,0),"BRB":(W,0,0),
-        "TLF":(0,H,H),"TRF":(W,H,H),"TLB":(0,0,H),"TRB":(W,0,H),
-    }.items()}
+    iso_max = all_pts + shift
+    canvas_W = int(np.ceil(iso_max[:,0].max())) + PAD
+    canvas_H = int(np.ceil(iso_max[:,1].max())) + PAD
 
-    all_pts = np.array(list(raw.values()))
-    shift = np.array([PAD - all_pts[:,0].min(),
-                      PAD - all_pts[:,1].min()])
+    BLF,BRF,BLB,BRB = C["BLF"],C["BRF"],C["BLB"],C["BRB"]
+    TLF,TRF,TLB,TRB = C["TLF"],C["TRF"],C["TLB"],C["TRB"]
 
-    corners = {k: v + shift for k, v in raw.items()}
-    iso_max = all_pts.max(axis=0) + shift + PAD
-
-    canvas_W = int(np.ceil(iso_max[0]))
-    canvas_H = int(np.ceil(iso_max[1]))
-
-    # Convenient shorthand
-    BLF,BRF,BLB,BRB = corners["BLF"],corners["BRF"],corners["BLB"],corners["BRB"]
-    TLF,TRF,TLB,TRB = corners["TLF"],corners["TRF"],corners["TLB"],corners["TRB"]
-
-    # ── Warp face onto canvas ─────────────────────────────────────────────────
-    def warp_face(src_img, bl, br, tl, shade=1.0):
+    # ── Warp helper ───────────────────────────────────────────────────────────
+    def warp_face(src, bl, br, tl, shade=1.0):
         """
-        Project src_img (H_s×W_s×3) onto the parallelogram (bl,br,tl,tr)
-        in the canvas.  bl/br/tl are canvas pixel coords [col,row].
-
-        right = br - bl  (maps src col 0→W_s)
-        up    = tl - bl  (maps src row H_s-1→0, i.e. tl=top of image)
-
-        Returns (face_rgb, mask) both shaped (canvas_H, canvas_W).
+        Warp src (H_s×W_s×3 float32) into parallelogram defined by
+        bottom-left=bl, bottom-right=br, top-left=tl (canvas pixel coords).
+        right = br-bl  maps u in [0,1] → src cols
+        up    = tl-bl  maps v in [0,1] → src rows (v=1 → row 0 = top of image)
         """
-        H_s, W_s = src_img.shape[:2]
-        right = np.array(br) - np.array(bl)
-        up    = np.array(tl) - np.array(bl)
+        H_s, W_s = src.shape[:2]
+        bl = np.asarray(bl, float)
+        right = np.asarray(br, float) - bl
+        up    = np.asarray(tl, float) - bl
 
-        # Inverse matrix: [col-bl_col, row-bl_row] = A @ [u, v]
-        A = np.stack([right, up], axis=1)   # 2×2
-        try:
-            Ai = np.linalg.inv(A)
-        except np.linalg.LinAlgError:
-            return np.zeros((canvas_H,canvas_W,3),np.float32), np.zeros((canvas_H,canvas_W),bool)
+        A  = np.stack([right, up], axis=1)
+        Ai = np.linalg.inv(A)
 
-        gc, gr = np.meshgrid(np.arange(canvas_W, dtype=float),
-                             np.arange(canvas_H, dtype=float))
+        gc = np.tile(np.arange(canvas_W, dtype=np.float32), (canvas_H, 1))
+        gr = np.tile(np.arange(canvas_H, dtype=np.float32)[:,None], (1, canvas_W))
+
         dc = gc - bl[0]; dr = gr - bl[1]
-        u = Ai[0,0]*dc + Ai[0,1]*dr
-        v = Ai[1,0]*dc + Ai[1,1]*dr
+        u  = Ai[0,0]*dc + Ai[0,1]*dr
+        v  = Ai[1,0]*dc + Ai[1,1]*dr
 
-        mask = (u >= -1e-6) & (u <= 1+1e-6) & (v >= -1e-6) & (v <= 1+1e-6)
+        # Mask: strictly inside the parallelogram
+        EPS = 3e-3
+        mask = (u >= -EPS) & (u <= 1+EPS) & (v >= -EPS) & (v <= 1+EPS)
         u = np.clip(u, 0, 1); v = np.clip(v, 0, 1)
 
-        # u → source column (0→W_s-1), v → source row (1→0, flip so tl=top)
         src_col = u * (W_s - 1)
-        src_row = (1 - v) * (H_s - 1)
+        src_row = (1.0 - v) * (H_s - 1)   # v=1 → row 0 (top of image = top of face)
 
         face = np.zeros((canvas_H, canvas_W, 3), dtype=np.float32)
-        for c in range(3):
-            vals = map_coordinates(src_img[:,:,c], [src_row, src_col],
+        for ch in range(3):
+            vals = map_coordinates(src[:,:,ch], [src_row, src_col],
                                    order=1, mode='nearest')
-            face[:,:,c] = np.clip(vals * shade, 0, 1).astype(np.float32)
-
+            face[:,:,ch] = np.clip(vals * shade, 0, 1)
         return face, mask
 
-    # ── Render (back to front for correct occlusion) ──────────────────────────
+    # ── Render canvas ─────────────────────────────────────────────────────────
     canvas = np.ones((canvas_H, canvas_W, 3), dtype=np.float32)
 
-    # Top face: bl=TLB, br=TRB, tl=TLF  (image: Z rows go front→back)
-    f, m = warp_face(img_z[::-1],  TLB, TRB, TLF, shade=1.00)
+    # Top face   (IPF-Z): bottom=back edge, top=front edge
+    f, m = warp_face(img_z[::-1], TLB, TRB, TLF, shade=1.00)
+    canvas[m] = f[m]
+    # Front face (IPF-Y): bottom=bottom-front edge, top=top-front edge
+    f, m = warp_face(img_y[::-1], BLF, BRF, TLF, shade=0.78)
+    canvas[m] = f[m]
+    # Right face (IPF-X): bottom=bottom-right edge, top=top-right edge
+    # For right face: "columns" go along Y-depth (BRF→BRB), rows along Z
+    f, m = warp_face(img_x[::-1], BRF, BRB, TRF, shade=0.60)
     canvas[m] = f[m]
 
-    # Front face: bl=BLF, br=BRF, tl=TLF  (image: rows=Y, cols=X)
-    f, m = warp_face(img_y[::-1],  BLF, BRF, TLF, shade=0.78)
-    canvas[m] = f[m]
+    # ── Scale bars (drawn onto canvas array) ──────────────────────────────────
+    def draw_scalebar_on_canvas(canvas, p_start, p_end, label,
+                                bar_thickness=3, color=(1.,1.,1.)):
+        """Draw a scale bar line between two canvas pixel positions."""
+        from PIL import Image as PILImg, ImageDraw, ImageFont
+        # Draw line
+        img_pil = PILImg.fromarray((canvas * 255).astype(np.uint8))
+        draw = ImageDraw.Draw(img_pil)
+        x0,y0 = int(round(p_start[0])), int(round(p_start[1]))
+        x1,y1 = int(round(p_end[0])),   int(round(p_end[1]))
+        col8 = tuple(int(c*255) for c in color)
+        draw.line([(x0,y0),(x1,y1)], fill=col8, width=bar_thickness)
+        # End ticks (perpendicular, 4px each side)
+        dx, dy = x1-x0, y1-y0
+        L = max(1, np.sqrt(dx**2+dy**2))
+        nx, ny = -dy/L*4, dx/L*4
+        for px, py in [(x0,y0),(x1,y1)]:
+            draw.line([(int(px-nx),int(py-ny)),(int(px+nx),int(py+ny))],
+                      fill=col8, width=bar_thickness)
+        return np.array(img_pil).astype(np.float32)/255.0
 
-    # Right face: bl=BRF, br=BRB, tl=TRF  (image: rows=Y reversed as depth)
-    f, m = warp_face(img_x[::-1],  BRF, BRB, TRF, shade=0.60)
-    canvas[m] = f[m]
+    # Compute nice round scale bar length (~20% of face width, rounded)
+    def nice_bar(total_um, frac=0.20):
+        raw = total_um * frac
+        mag = 10**np.floor(np.log10(raw))
+        for m in [1,2,5,10]:
+            if m*mag >= raw*0.5:
+                return m*mag
+        return mag*10
 
-    # ── Plot ──────────────────────────────────────────────────────────────────
+    X_um = W * sx * ds
+    Y_um = H * sy * ds
+    bar_x_um  = nice_bar(X_um)
+    bar_y_um  = nice_bar(Y_um)
+    bar_z_um  = nice_bar(Y_um)   # Z height uses same physical scale as Y
+
+    # Scale bar pixel lengths
+    bar_x_px = bar_x_um / X_um * FW          # pixels along X direction
+    bar_y_px = bar_y_um / Y_um * FH          # pixels along Y direction
+    bar_z_px = bar_z_um / Y_um * FZ          # pixels along Z direction
+
+    # Positions for scale bars (placed near bottom of each face, offset inward)
+    OFF = 10   # pixels from edge
+
+    # ── Front face scale bar (along X, horizontal-ish) ────────────────────────
+    # Place near bottom of front face, left side
+    sb_fx_start = BLF + (BRF-BLF)*0.07 + (TLF-BLF)*0.08
+    bar_x_vec   = (BRF - BLF) / np.linalg.norm(BRF - BLF)
+    sb_fx_end   = sb_fx_start + bar_x_vec * bar_x_px * SCALE / FW * FW
+    # Correct: bar_x_px is already in canvas pixels (fraction of FW)
+    sb_fx_end   = sb_fx_start + bar_x_vec * (bar_x_um / X_um * FW)
+
+    # ── Right face scale bar (along Y depth) ──────────────────────────────────
+    sb_ry_start = BRF + (BRB-BRF)*0.07 + (TRF-BRF)*0.08
+    bar_y_vec   = (BRB - BRF) / np.linalg.norm(BRB - BRF)
+    sb_ry_end   = sb_ry_start + bar_y_vec * (bar_y_um / Y_um * FH)
+
+    # ── Top face scale bar (along X, near front edge) ─────────────────────────
+    sb_tx_start = TLF + (TRF-TLF)*0.07 + (TLB-TLF)*0.05
+    bar_tx_vec  = (TRF - TLF) / np.linalg.norm(TRF - TLF)
+    sb_tx_end   = sb_tx_start + bar_tx_vec * (bar_x_um / X_um * FW)
+
+    # Draw scale bars
+    for p0, p1 in [(sb_fx_start,sb_fx_end),(sb_ry_start,sb_ry_end),(sb_tx_start,sb_tx_end)]:
+        canvas = draw_scalebar_on_canvas(canvas, p0, p1, "", bar_thickness=2)
+
+    # ── Figure ────────────────────────────────────────────────────────────────
     fig = plt.figure(figsize=(9, 8))
     ax  = fig.add_axes([0.0, 0.03, 0.72, 0.93])
     ax.imshow(canvas, origin="upper", interpolation="nearest", aspect="equal")
     ax.axis("off")
     fig.patch.set_facecolor("white")
 
-    # Edges
+    # ── Cube edges — ONLY the 12 outer edges, NO internal diagonals ───────────
     ekw = dict(color="black", lw=1.0, zorder=5)
-    for a,b in [(BLF,BRF),(BLF,BLB),(BLF,TLF),
-                (BRF,BRB),(BRF,TRF),
-                (BLB,BRB),(BLB,TLB),
-                (TLF,TRF),(TLF,TLB),
-                (BRB,TRB),(TRF,TRB),(TLB,TRB)]:
+    outer_edges = [
+        # Bottom: only the 3 visible edges
+        (BLF,BRF),               # front bottom
+        (BRF,BRB),               # right bottom
+        (BLF,BLB),               # left bottom (visible as left edge of front face)
+        # Top: all 4 visible
+        (TLF,TRF),               # front top
+        (TRF,TRB),               # right top
+        (TRB,TLB),               # back top
+        (TLB,TLF),               # left top
+        # Vertical pillars: only 3 visible
+        (BLF,TLF),               # front-left pillar
+        (BRF,TRF),               # front-right pillar
+        (BRB,TRB),               # back-right pillar
+    ]
+    for a,b in outer_edges:
         ax.plot([a[0],b[0]],[a[1],b[1]],**ekw)
 
-    # Labels
-    lbb = dict(boxstyle="round,pad=0.2", fc="white", ec="#aaa", alpha=0.9, lw=0.5)
-    lkw = dict(fontsize=9, fontweight="bold", ha="center", va="center", zorder=10, bbox=lbb)
-    mX = (BLF+BRF)/2; ax.text(mX[0], mX[1]+14, f"X  ({W*sx*ds:.0f} µm)", color="darkred",  **lkw)
-    mY = (BLF+BLB)/2; ax.text(mY[0]-22, mY[1],  f"Y  ({H*sy*ds:.0f} µm)", color="#006600", **lkw)
-    mZ = (BLF+TLF)/2; ax.text(mZ[0]-18, mZ[1],  "Z",                       color="navy",    **lkw)
+    # ── Scale bar labels (outside the face, near the bars) ───────────────────
+    sblkw = dict(fontsize=7, ha="center", va="center", zorder=12, color="black",
+                 bbox=dict(boxstyle="round,pad=0.15", fc="white", alpha=0.85, lw=0))
+    # Front face bar label
+    mid_fx = (sb_fx_start + sb_fx_end) / 2
+    perp_fx = np.array([-(sb_fx_end-sb_fx_start)[1],
+                          (sb_fx_end-sb_fx_start)[0]])
+    perp_fx /= (np.linalg.norm(perp_fx) + 1e-9)
+    ax.text(mid_fx[0]+perp_fx[0]*10, mid_fx[1]+perp_fx[1]*10,
+            f"{bar_x_um:.0f} µm", **sblkw)
+    # Right face bar label
+    mid_ry = (sb_ry_start + sb_ry_end) / 2
+    perp_ry = np.array([-(sb_ry_end-sb_ry_start)[1],
+                          (sb_ry_end-sb_ry_start)[0]])
+    perp_ry /= (np.linalg.norm(perp_ry) + 1e-9)
+    ax.text(mid_ry[0]+perp_ry[0]*10, mid_ry[1]+perp_ry[1]*10,
+            f"{bar_y_um:.0f} µm", **sblkw)
+    # Top face bar label
+    mid_tx = (sb_tx_start + sb_tx_end) / 2
+    perp_tx = np.array([-(sb_tx_end-sb_tx_start)[1],
+                          (sb_tx_end-sb_tx_start)[0]])
+    perp_tx /= (np.linalg.norm(perp_tx) + 1e-9)
+    ax.text(mid_tx[0]+perp_tx[0]*10, mid_tx[1]+perp_tx[1]*10,
+            f"{bar_x_um:.0f} µm", **sblkw)
 
-    flkw = dict(fontsize=9, ha="center", va="center", zorder=10, color="black",
-                fontweight="bold",
-                bbox=dict(boxstyle="round,pad=0.25", fc="white", alpha=0.75, lw=0))
-    tc = (TLB+TRB+TRF+TLF)/4; ax.text(tc[0], tc[1], "IPF // Z", **flkw)
-    fc = (BLF+BRF+TRF+TLF)/4; ax.text(fc[0], fc[1], "IPF // Y", **flkw)
-    rc = (BRF+BRB+TRB+TRF)/4; ax.text(rc[0], rc[1], "IPF // X", **flkw)
+    # ── Face labels — inside each face, unobtrusive ───────────────────────────
+    flkw = dict(fontsize=8, ha="center", va="center", zorder=10,
+                color="white", fontweight="bold",
+                bbox=dict(boxstyle="round,pad=0.2", fc="black", alpha=0.45, lw=0))
+    tc = (TLB+TRB+TRF+TLF)/4;  ax.text(tc[0], tc[1], "IPF // Z", **flkw)
+    fcc= (BLF+BRF+TRF+TLF)/4;  ax.text(fcc[0],fcc[1],"IPF // Y", **flkw)
+    rc = (BRF+BRB+TRB+TRF)/4;  ax.text(rc[0], rc[1], "IPF // X", **flkw)
+
+    # ── Axis labels — OUTSIDE the cube, with annotation arrows ───────────────
+    akw = dict(fontsize=10, fontweight="bold", ha="center", va="center",
+               zorder=12,
+               bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="#aaa",
+                         alpha=0.95, lw=0.7))
+    arro = dict(arrowstyle="-|>", color="black", lw=1.0)
+
+    # X label: below the bottom-front edge midpoint
+    mX = (BLF + BRF) / 2
+    ax.annotate(f"X\n({X_um:.0f} µm)", xy=(mX[0], mX[1]),
+                xytext=(mX[0], mX[1]+30),
+                arrowprops=arro, fontsize=9, fontweight="bold",
+                ha="center", va="top", zorder=12, color="darkred",
+                bbox=dict(boxstyle="round,pad=0.3",fc="white",ec="#ccc",alpha=0.95,lw=0.5))
+
+    # Y label: to the left of the bottom-left edge midpoint
+    mY = (BLF + BLB) / 2
+    ax.annotate(f"Y\n({Y_um:.0f} µm)", xy=(mY[0], mY[1]),
+                xytext=(mY[0]-38, mY[1]),
+                arrowprops=arro, fontsize=9, fontweight="bold",
+                ha="right", va="center", zorder=12, color="#006600",
+                bbox=dict(boxstyle="round,pad=0.3",fc="white",ec="#ccc",alpha=0.95,lw=0.5))
+
+    # Z label: to the left of the left-vertical edge midpoint
+    mZ = (BLF + TLF) / 2
+    ax.annotate("Z", xy=(mZ[0], mZ[1]),
+                xytext=(mZ[0]-32, mZ[1]),
+                arrowprops=arro, fontsize=10, fontweight="bold",
+                ha="right", va="center", zorder=12, color="navy",
+                bbox=dict(boxstyle="round,pad=0.3",fc="white",ec="#ccc",alpha=0.95,lw=0.5))
 
     ax.set_title(title, fontsize=12, fontweight="bold", pad=10)
-    ax.set_xlim(0, canvas_W); ax.set_ylim(canvas_H, 0)
+    ax.set_xlim(-2, canvas_W + 2)
+    ax.set_ylim(canvas_H + 35, -2)   # extra room at bottom for X label
 
-    # Legend
+    # ── Legend triangle ───────────────────────────────────────────────────────
     ax_leg = fig.add_axes([0.72, 0.60, 0.25, 0.23])
     plot_ipf_legend(ax=ax_leg, title=f"{phase_label}\n001", fontsize=8)
 
-    # Reference frame
+    # ── Sample reference frame ────────────────────────────────────────────────
     ax_ref = fig.add_axes([0.72, 0.35, 0.25, 0.20])
     for tail, head, lbl, col in [
         ((0.45,0.45),(0.92,0.45),"X","darkred"),
@@ -637,10 +752,12 @@ def plot_ipf_3d_cube(phi1_arr, Phi_arr, phi2_arr,
     ]:
         ax_ref.annotate("", xy=head, xytext=tail,
                         arrowprops=dict(arrowstyle="-|>", color=col, lw=1.5))
-        off=(np.array(head)-np.array(tail))*0.22
-        ax_ref.text(head[0]+off[0],head[1]+off[1],lbl,
-                    fontsize=10,fontweight="bold",color=col,ha="center",va="center")
-    ax_ref.set_xlim(-0.1,1.2); ax_ref.set_ylim(-0.1,1.2); ax_ref.axis("off")
+        off = (np.array(head)-np.array(tail))*0.22
+        ax_ref.text(head[0]+off[0], head[1]+off[1], lbl,
+                    fontsize=10, fontweight="bold", color=col,
+                    ha="center", va="center")
+    ax_ref.set_xlim(-0.1,1.2); ax_ref.set_ylim(-0.1,1.2)
+    ax_ref.axis("off")
     ax_ref.set_title("Sample axes", fontsize=7, pad=2)
 
     return fig
