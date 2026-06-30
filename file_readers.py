@@ -13,6 +13,20 @@ import numpy as np
 import pandas as pd
 
 
+def _coerce_numeric(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Convert columns to numeric where possible, leaving non-numeric columns
+    (e.g. phase names) untouched. Replaces the removed pandas
+    `to_numeric(errors="ignore")` behaviour (gone in pandas 3.0).
+    """
+    for c in df.columns:
+        conv = pd.to_numeric(df[c], errors="coerce")
+        # keep the conversion only if it did not turn valid values into NaN
+        if conv.notna().sum() == df[c].notna().sum():
+            df[c] = conv
+    return df
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  CTF READER  (Oxford Instruments / HKL Channel 5)
 # ══════════════════════════════════════════════════════════════════════════════
@@ -373,7 +387,7 @@ def _try_embedded_csv_bcf(file_bytes: bytes) -> tuple[pd.DataFrame | None, dict]
             engine="python",
             on_bad_lines="skip",
         )
-        df = df.apply(pd.to_numeric, errors="ignore")
+        df = _coerce_numeric(df)
         return df, {"Source Format": "BCF (embedded text data)"}
     except Exception:
         return None, {}
@@ -437,7 +451,7 @@ def load_ebsd_file(file_bytes: bytes, filename: str,
                 on_bad_lines="skip",
             )
             df.columns = df.columns.str.strip()
-            df = df.apply(pd.to_numeric, errors="ignore")
+            df = _coerce_numeric(df)
             meta = {"Source Format": "CSV/Text", "Rows": len(df)}
             return df, meta
         except Exception as e:
