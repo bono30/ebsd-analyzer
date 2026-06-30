@@ -1,163 +1,125 @@
 <!DOCTYPE html>
 <html lang="pt-BR">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>EBSD Analyzer</title>
-  <style>
-    :root {
-      --blue: #1f77b4;
-      --blue-dark: #145a8a;
-      --ink: #1a1a1a;
-      --muted: #5b6470;
-      --bg: #f5f7fa;
-      --card: #ffffff;
-      --border: #e2e8f0;
-      --warn-bg: #fff8e6;
-      --warn-border: #f0c14b;
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-      color: var(--ink);
-      background: var(--bg);
-      line-height: 1.55;
-    }
-    .wrap { max-width: 880px; margin: 0 auto; padding: 32px 20px 64px; }
-    header { text-align: center; padding: 28px 0 8px; }
-    header h1 { font-size: 2.1rem; margin: 0 0 6px; }
-    header .sub { color: var(--muted); font-size: 1.05rem; margin: 0; }
-    .cta { text-align: center; margin: 28px 0 8px; }
-    .btn {
-      display: inline-block;
-      background: var(--blue);
-      color: #fff;
-      text-decoration: none;
-      font-weight: 600;
-      font-size: 1.1rem;
-      padding: 14px 30px;
-      border-radius: 10px;
-      box-shadow: 0 2px 8px rgba(31,119,180,.25);
-      transition: background .15s ease;
-    }
-    .btn:hover { background: var(--blue-dark); }
-    .cta .hint { display: block; color: var(--muted); font-size: .9rem; margin-top: 10px; }
-    .card {
-      background: var(--card);
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 22px 24px;
-      margin: 18px 0;
-    }
-    .card h2 { margin: 0 0 12px; font-size: 1.25rem; }
-    table { width: 100%; border-collapse: collapse; font-size: .95rem; }
-    th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }
-    th { color: var(--muted); font-weight: 600; }
-    code {
-      background: #eef2f7;
-      padding: 2px 6px;
-      border-radius: 5px;
-      font-size: .9em;
-    }
-    ul { margin: 8px 0; padding-left: 22px; }
-    li { margin: 4px 0; }
-    .warn {
-      background: var(--warn-bg);
-      border: 1px solid var(--warn-border);
-      border-radius: 10px;
-      padding: 14px 18px;
-      font-size: .95rem;
-    }
-    .steps { counter-reset: step; list-style: none; padding-left: 0; }
-    .steps li { counter-increment: step; padding-left: 38px; position: relative; margin: 10px 0; }
-    .steps li::before {
-      content: counter(step);
-      position: absolute; left: 0; top: 0;
-      width: 26px; height: 26px;
-      background: var(--blue); color: #fff;
-      border-radius: 50%;
-      display: flex; align-items: center; justify-content: center;
-      font-size: .85rem; font-weight: 700;
-    }
-    footer { text-align: center; color: var(--muted); font-size: .85rem; margin-top: 28px; }
-    a { color: var(--blue); }
-  </style>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EBSD Analyzer</title>
+<style>
+  body {
+    margin: 0;
+    background: #ffffff;
+    color: #1a1a1a;
+    font-family: Arial, Helvetica, sans-serif;
+    line-height: 1.6;
+  }
+  .wrap { max-width: 820px; margin: 0 auto; padding: 40px 24px 64px; }
+  h1 { font-size: 28px; margin: 0 0 4px; }
+  .sub { color: #555; margin: 0 0 24px; }
+  h2 { font-size: 19px; margin: 32px 0 10px; border-bottom: 1px solid #ddd; padding-bottom: 6px; }
+  p { margin: 10px 0; }
+  ul { margin: 10px 0; padding-left: 22px; }
+  li { margin: 4px 0; }
+  code { background: #f0f2f5; padding: 2px 6px; border-radius: 4px; font-family: Consolas, monospace; font-size: 14px; }
+  pre { background: #f0f2f5; padding: 12px 14px; border-radius: 6px; overflow-x: auto; }
+  pre code { background: none; padding: 0; }
+  table { width: 100%; border-collapse: collapse; margin: 10px 0; }
+  th, td { text-align: left; padding: 8px 10px; border: 1px solid #ddd; font-size: 14px; }
+  th { background: #f0f2f5; }
+  .btn {
+    display: inline-block;
+    background: #1f77b4;
+    color: #ffffff;
+    text-decoration: none;
+    font-weight: bold;
+    font-size: 17px;
+    padding: 13px 30px;
+    border-radius: 6px;
+    margin: 8px 0;
+  }
+  .note {
+    border-left: 4px solid #f0c14b;
+    background: #fff8e6;
+    padding: 12px 16px;
+    margin: 16px 0;
+    font-size: 14px;
+  }
+  footer { margin-top: 36px; padding-top: 16px; border-top: 1px solid #ddd; color: #777; font-size: 13px; }
+  a { color: #1f77b4; }
+</style>
 </head>
 <body>
-  <div class="wrap">
-    <header>
-      <h1>🔬 EBSD Analyzer</h1>
-      <p class="sub">Análise de dados de EBSD direto no navegador — tamanho de grão,
-        desorientação, textura, KAM e figuras prontas para publicação.</p>
-    </header>
+<div class="wrap">
 
-    <div class="cta">
-      <a class="btn" href="/port/5000" id="open-app">▶ Abrir o aplicativo</a>
-      <span class="hint">O aplicativo (Streamlit) roda em <code>/port/5000</code>.
-        Se o botão não abrir, aguarde alguns segundos e recarregue.</span>
-    </div>
+  <h1>EBSD Analyzer</h1>
+  <p class="sub">Analise de dados de EBSD (Electron Backscatter Diffraction) direto no navegador.</p>
 
-    <div class="card warn">
-      ⚠️ <strong>Dados de exemplo são SINTÉTICOS</strong> (gerados por computador).
-      Servem apenas para demonstrar o aplicativo — <strong>não são dados
-      experimentais reais</strong> e não devem ser usados como resultado de pesquisa.
-    </div>
+  <p><a class="btn" href="/port/5000">Abrir o aplicativo</a></p>
+  <p style="color:#555; font-size:14px;">O aplicativo (Streamlit) roda em <code>/port/5000</code>.
+  Se nao abrir de imediato, aguarde alguns segundos e recarregue a pagina.</p>
 
-    <div class="card">
-      <h2>Como usar (teste em 4 passos)</h2>
-      <ol class="steps">
-        <li>Clique em <strong>“Abrir o aplicativo”</strong> acima.</li>
-        <li>Na barra lateral, clique em <strong>Browse files</strong>.</li>
-        <li>Envie o exemplo mínimo <code>sample_data/exemplo_graos.csv</code>
-          (dados por grão) — as análises são preenchidas automaticamente.</li>
-        <li>Para testar a segmentação automática de grãos a partir de pixels,
-          envie <code>sample_data/exemplo_pixels.ctf</code>.</li>
-      </ol>
-    </div>
+  <h2>O que o aplicativo faz</h2>
+  <ul>
+    <li>Distribuicao de tamanho de grao (histograma log-normal, CDF, teste de normalidade)</li>
+    <li>Histograma de desorientacao (LAGB/HAGB, curva de Mackenzie)</li>
+    <li>Resumo de textura e fracoes de orientacoes ideais</li>
+    <li>Deteccao de outliers (IQR / Z-score)</li>
+    <li>KAM e estimativa de densidade de discordancias (GND)</li>
+    <li>Mapas IPF (triangulo, cubo 3D), figuras de polo e exportacao em PNG / SVG / PDF</li>
+  </ul>
 
-    <div class="card">
-      <h2>O que o app faz</h2>
-      <ul>
-        <li>Distribuição de <strong>tamanho de grão</strong> (log-normal, CDF, normalidade)</li>
-        <li>Histograma de <strong>desorientação</strong> (LAGB/HAGB, curva de Mackenzie)</li>
-        <li>Resumo de <strong>textura</strong> e frações de orientações ideais</li>
-        <li>Detecção de <strong>outliers</strong> (IQR / Z-score)</li>
-        <li><strong>KAM</strong> e estimativa de densidade de discordâncias (GND)</li>
-        <li>Visualizações <strong>IPF</strong> (mapa, triângulo, cubo 3D) e <strong>figuras de polo</strong></li>
-        <li>Exportação das figuras em PNG / SVG / PDF (300 dpi)</li>
-      </ul>
-    </div>
+  <h2>Arquivos aceitos</h2>
+  <table>
+    <tr><th>Formato</th><th>Extensao</th><th>Origem / nivel</th></tr>
+    <tr><td>CSV / TXT</td><td>.csv, .txt</td><td>OIM, AztecCrystal, MTEX - dados por grao</td></tr>
+    <tr><td>CTF</td><td>.ctf</td><td>Oxford / HKL - dados por pixel</td></tr>
+    <tr><td>BCF</td><td>.bcf</td><td>Bruker Esprit (se falhar, exporte como CSV)</td></tr>
+  </table>
+  <p style="font-size:14px; color:#555;">Se os nomes das colunas forem diferentes, use o painel
+  <strong>Column mapping</strong> dentro do aplicativo.</p>
 
-    <div class="card">
-      <h2>Arquivos e formatos aceitos</h2>
-      <table>
-        <thead><tr><th>Formato</th><th>Extensão</th><th>Origem / nível</th></tr></thead>
-        <tbody>
-          <tr><td>CTF</td><td><code>.ctf</code></td><td>Oxford / HKL — dados por pixel</td></tr>
-          <tr><td>BCF</td><td><code>.bcf</code></td><td>Bruker Esprit (se falhar, exporte como CSV)</td></tr>
-          <tr><td>CSV / TXT</td><td><code>.csv</code>, <code>.txt</code></td><td>OIM, AztecCrystal, MTEX — dados por grão</td></tr>
-        </tbody>
-      </table>
-      <p style="margin:12px 0 0; color:var(--muted); font-size:.9rem;">
-        Se os nomes das colunas forem diferentes, use o painel
-        <strong>Column mapping</strong> dentro do app.</p>
-    </div>
-
-    <div class="card">
-      <h2>Quer rodar no seu computador?</h2>
-      <p style="margin:0 0 8px;">Instale o Python, depois:</p>
-      <pre style="background:#eef2f7;padding:12px 14px;border-radius:8px;overflow:auto;"><code>pip install -r requirements.txt
-streamlit run app.py</code></pre>
-      <p style="margin:8px 0 0;">Instruções completas em
-        <a href="https://github.com/bono30/ebsd-analyzer/blob/main/GUIA.md">GUIA.md</a>
-        (Português) e no
-        <a href="https://github.com/bono30/ebsd-analyzer">repositório no GitHub</a>.</p>
-    </div>
-
-    <footer>
-      EBSD Analyzer · Streamlit · Licença MIT · Dados de exemplo sintéticos
-    </footer>
+  <h2>Teste minimo</h2>
+  <ol>
+    <li>Clique em <strong>Abrir o aplicativo</strong>.</li>
+    <li>Na barra lateral, clique em <strong>Browse files</strong>.</li>
+    <li>Envie <code>sample_data/exemplo_graos.csv</code> (dados por grao).</li>
+    <li>Para testar a segmentacao automatica, envie <code>sample_data/exemplo_pixels.ctf</code> (dados por pixel).</li>
+  </ol>
+  <div class="note">
+    <strong>Atencao:</strong> os arquivos de exemplo sao <strong>sinteticos</strong>
+    (gerados por computador) apenas para demonstracao. Nao sao dados experimentais
+    reais e nao devem ser usados como resultado de pesquisa.
   </div>
+
+  <h2>Privacidade</h2>
+  <div class="note">
+    Esta e uma <strong>demonstracao publica</strong>. Os arquivos enviados sao
+    processados no servidor (em memoria) e nao sao armazenados permanentemente,
+    mas <strong>nao envie dados confidenciais ou ainda nao publicados</strong> para
+    esta instancia publica.
+  </div>
+
+  <h2>Arquivos do repositorio necessarios</h2>
+  <ul>
+    <li><code>app.py</code> - aplicativo principal (ponto de entrada)</li>
+    <li><code>requirements.txt</code> - dependencias Python</li>
+    <li><code>file_readers.py</code> - leitura de CSV / CTF / BCF</li>
+    <li><code>ctf_processing.py</code> - segmentacao de graos, KAM, estatisticas</li>
+    <li><code>ipf_plots.py</code> - graficos IPF (triangulo, cubo 3D)</li>
+    <li><code>pf_plots.py</code> - figuras de polo e mapa IPF 2D</li>
+    <li><code>sample_data/</code> - dados de exemplo (exemplo_graos.csv, exemplo_pixels.ctf)</li>
+  </ul>
+
+  <h2>Atualizacao manual (editar e republicar)</h2>
+  <p>Apos editar os arquivos, atualize o repositorio. O deploy e refeito a partir do novo commit:</p>
+  <pre><code>git add .
+git commit -m "descreva a mudanca"
+git push origin main</code></pre>
+  <p style="font-size:14px;">Guia completo em Portugues:
+  <a href="https://github.com/bono30/ebsd-analyzer/blob/main/GUIA.md">GUIA.md</a> -
+  Repositorio: <a href="https://github.com/bono30/ebsd-analyzer">github.com/bono30/ebsd-analyzer</a></p>
+
+  <footer>EBSD Analyzer - Streamlit - Licenca MIT - Dados de exemplo sinteticos</footer>
+
+</div>
 </body>
 </html>
