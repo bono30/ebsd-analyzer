@@ -122,6 +122,12 @@ direto ao repositório do GitHub:
 > Não é preciso configurar servidor: o Streamlit Cloud lê o `requirements.txt`
 > e instala as dependências sozinho.
 
+> ⚠️ **Privacidade (instância pública):** em uma demonstração pública, os
+> arquivos enviados são processados no servidor (em memória) e não são
+> armazenados permanentemente, mas **não envie dados confidenciais ou ainda não
+> publicados** para uma instância pública. Para dados sigilosos, rode o app
+> localmente (Seção 5).
+
 ---
 
 ## 7. Guia curto: atualizar a pasta depois (manual)
