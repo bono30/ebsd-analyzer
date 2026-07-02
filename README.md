@@ -12,7 +12,8 @@ A local Streamlit app for EBSD (Electron Backscatter Diffraction) data analysis.
 | **Misorientation** | LAGB/HAGB frequency bar chart, Mackenzie random-texture reference curve, fraction 15°–65° |
 | **Texture** | Euler angle distributions, ideal orientation fractions (Cube, Goss, Brass, Gamma fiber), Φ vs φ₂ ODF section |
 | **Outliers** | IQR / Z-score / Modified Z-score detection with boxplots and outlier row table |
-| **KAM / IQ** | KAM distribution, Image Quality histogram, GND density estimate (Kubin–Mortensen method) |
+| **KAM / IQ** | KAM distribution, Image Quality histogram, GND density estimate with method/assumptions and discrepancy diagnostics |
+| **Reference workbook** | Optional `.xlsx/.xlsm` EBSD export (AztecCrystal/ESPRIT) for step-size calibration and cross-checking grain/boundary/texture stats |
 | **Export** | All figures as ZIP (PNG/SVG/PDF at 300 dpi) + individual downloads + stats CSV |
 
 ---
@@ -50,6 +51,7 @@ Your browser opens at `http://localhost:8501`.
 | **CTF** | `.ctf` | Oxford Instruments / HKL Channel 5 | Direct upload — full header parsed automatically |
 | **BCF** | `.bcf` | Bruker Esprit EBSD | Binary container auto-extracted |
 | **CSV / TXT** | `.csv`, `.txt` | OIM, AztecCrystal, MTEX, any export | Configurable separator and decimal |
+| **Excel (reference)** | `.xlsx`, `.xlsm` | AztecCrystal / ESPRIT export workbook | Optional — calibration/cross-check only, not a raw map |
 
 ### CTF column mapping (auto-detected)
 
@@ -130,14 +132,33 @@ To regenerate the samples: `python generate_sample.py`.
 
 ## GND Density Formula
 
-The **Kernel Average Misorientation (KAM)** method uses the Kubin–Mortensen (2003) relation:
+The **Kernel Average Misorientation (KAM)** method uses the Kubin–Mortensen (2003) /
+Calcagnotto et al. (2010) relation:
 
-$$\rho_{GND} = \frac{2\,\theta_{KAM}}{u \cdot b}$$
+$$\rho_{GND} = \frac{2\,\theta_{KAM}}{\alpha \cdot u \cdot b}$$
 
 Where:
-- θ_KAM = local misorientation in radians
-- u = 1.86 × step size (m)
-- b = Burgers vector (m): Fe BCC ≈ 0.248 nm, FCC ≈ 0.254 nm
+- θ_KAM = local misorientation in **radians** (converted from degrees with `np.deg2rad`)
+- u = step size in **metres** (µm × 1e-6)
+- b = Burgers vector in **metres**: Fe BCC ≈ 0.248 nm, FCC ≈ 0.254 nm, Al ≈ 0.286 nm
+- α = method/geometry factor, **default 1** (standard form)
+
+> **Note on discrepant GND values.** Earlier versions of this app used **α ≈ 1.86**,
+> which lowers ρ by that factor and is a common source of mismatch against other
+> tools. α is now an adjustable input, and the **KAM / Band Contrast** tab shows a
+> *discrepancy diagnostics* panel comparing α=1 vs α=1.86 and flagging the usual
+> pitfalls (deg↔rad, µm↔m, Burgers vector, KAM kernel/threshold, step size,
+> clean-up). This estimate is a **lower bound** (resolved GNDs only; ignores SSDs).
+
+### Optional Excel reference workbook
+
+You can also upload an **EBSD export workbook** (`.xlsx` / `.xlsm`) from AztecCrystal
+or ESPRIT under **Reference workbook (optional)** in the sidebar. It is parsed for
+Overview metadata (step size, pixel count, raster, hit rate), Grain List statistics
+(incl. Mean/Maximum Orientation Spread), Boundary Statistics (LAGB/HAGB), pole-figure
+MUD peaks and Mackenzie summaries. It is used **only for calibration and cross-checking**
+— it never replaces the analysis of the uploaded EBSD map, and no GND value is taken
+from it (these exports do not contain one). See [`GUIA.md`](GUIA.md) §9 for details.
 
 ---
 
@@ -162,6 +183,7 @@ ebsd-analyzer/
 ├── ctf_processing.py         ← Grain segmentation, KAM, grain statistics
 ├── ipf_plots.py              ← IPF density / triangle / 3D cube plots
 ├── pf_plots.py               ← Pole figures and IPF 2D map
+├── excel_reference.py        ← Optional .xlsx/.xlsm reference-workbook parser
 ├── requirements.txt          ← Python package list
 ├── install.bat               ← Windows installer (creates venv)
 ├── run_app.bat               ← Windows launcher (uses venv)

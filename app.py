@@ -18,6 +18,7 @@ import io, zipfile, warnings
 warnings.filterwarnings("ignore")
 
 from file_readers import load_ebsd_file
+from excel_reference import parse_reference_workbook
 from ctf_processing import (
     compute_kam, segment_grains,
     compute_grain_stats, compute_grain_misorientation,
@@ -127,6 +128,17 @@ with st.sidebar:
     decimal_c = st.selectbox("Decimal separator", [".","," ], index=0)
 
     st.divider()
+    st.subheader("Reference workbook (optional)")
+    ref_upload = st.file_uploader(
+        "EBSD export workbook (.xlsx / .xlsm)",
+        type=["xlsx", "xlsm"],
+        accept_multiple_files=False,
+        help="Optional Excel export from AztecCrystal / ESPRIT (Overview, Grain List, "
+             "Boundary Statistics, pole & Mackenzie plots). Used for calibration and "
+             "cross-checking — it does NOT replace the uploaded EBSD map.",
+    )
+
+    st.divider()
     st.subheader("CTF processing")
     grain_threshold = st.slider(
         "Grain boundary threshold (°)", 2, 20, 10,
@@ -194,6 +206,136 @@ for f in uploaded:
 
 if not all_data:
     st.stop()
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  OPTIONAL REFERENCE WORKBOOK (.xlsx / .xlsm)
+# ═══════════════════════════════════════════════════════════════════════════════
+@st.cache_data(show_spinner=False)
+def load_reference(file_bytes):
+    try:
+        return parse_reference_workbook(file_bytes), None
+    except Exception as e:
+        return None, str(e)
+
+ref = None
+if ref_upload is not None:
+    ref_bytes = ref_upload.read()
+    with st.spinner(f"Reading reference workbook {ref_upload.name}…"):
+        ref, ref_err = load_reference(ref_bytes)
+    if ref_err:
+        st.error(f"**{ref_upload.name}**: could not parse reference workbook — {ref_err}")
+    elif ref:
+        ov = ref.get("overview", {})
+        ref_step = ov.get("step_size_um")
+        msg = f"📥 Reference workbook loaded: **{ref_upload.name}**"
+        extras = []
+        if ref_step:
+            extras.append(f"Step Size **{ref_step:.4g} µm**")
+        if ov.get("pixel_count"):
+            extras.append(f"Pixel Count **{int(ov['pixel_count']):,}**")
+        if extras:
+            msg += " — " + ", ".join(extras)
+        st.success(msg)
+        with st.expander("📊 Reference workbook summary (Excel)", expanded=True):
+            # ── Overview / acquisition metadata ────────────────────────────────
+            if ov:
+                st.markdown("**Acquisition metadata (Overview)**")
+                ov_rows = []
+                _labels = {
+                    "source_file": "Source file",
+                    "step_size_um": "Step Size (µm)",
+                    "pixel_count": "Pixel Count",
+                    "raster": "Raster",
+                    "hit_rate_pct": "Hit Rate (%)",
+                    "zero_solution_count": "Zero Solution Count",
+                }
+                for k, lbl in _labels.items():
+                    if ov.get(k) is not None:
+                        ov_rows.append({"Property": lbl, "Value": ov[k]})
+                if ov_rows:
+                    st.dataframe(pd.DataFrame(ov_rows), use_container_width=False,
+                                 hide_index=True)
+                if ov.get("phases"):
+                    ph_df = pd.DataFrame(ov["phases"])[["index", "name", "fraction_pct"]]
+                    ph_df.columns = ["#", "Phase", "Fraction (%)"]
+                    st.markdown("**Phase fractions**")
+                    st.dataframe(ph_df, use_container_width=False, hide_index=True)
+
+            # ── Grain list summary ──────────────────────────────────────────────
+            grain_ref = ref.get("grain", {})
+            if grain_ref.get("grain_count"):
+                st.markdown(f"**Grain List** — {grain_ref['grain_count']:,} grains")
+                if grain_ref.get("phase_counts"):
+                    st.caption("Grains per phase: " + ", ".join(
+                        f"{k}: {v}" for k, v in grain_ref["phase_counts"].items()))
+                stats = grain_ref.get("stats", {})
+                if stats:
+                    label_map = {
+                        "area": "Area (µm²)", "ecd": "ECD (µm)",
+                        "feret": "Max Feret (µm)", "perimeter": "Perimeter (µm)",
+                        "mos_mean": "Mean Orientation Spread (°)",
+                        "mos_max": "Maximum Orientation Spread (°)",
+                    }
+                    srows = []
+                    for key, lbl in label_map.items():
+                        if key in stats:
+                            s = stats[key]
+                            srows.append({
+                                "Attribute": lbl, "N": s["count"],
+                                "Mean": round(s["mean"], 4), "Median": round(s["median"], 4),
+                                "Std": round(s["std"], 4), "Min": round(s["min"], 4),
+                                "Max": round(s["max"], 4),
+                            })
+                    if srows:
+                        st.dataframe(pd.DataFrame(srows), use_container_width=True,
+                                     hide_index=True)
+
+            # ── Boundary statistics ─────────────────────────────────────────────
+            bnd = ref.get("boundary", {})
+            if bnd:
+                st.markdown("**Boundary Statistics (LAGB 2–10° / HAGB >10°)**")
+                brows = []
+                for phase, d in bnd.items():
+                    brows.append({
+                        "Phase": phase,
+                        "LAGB length (µm)": d.get("LAGB_length_um"),
+                        "LAGB fraction (%)": d.get("LAGB_fraction_pct"),
+                        "HAGB length (µm)": d.get("HAGB_length_um"),
+                        "HAGB fraction (%)": d.get("HAGB_fraction_pct"),
+                    })
+                st.dataframe(pd.DataFrame(brows), use_container_width=True, hide_index=True)
+
+            # ── Pole figure MUD peaks ───────────────────────────────────────────
+            pole = ref.get("pole", [])
+            if pole:
+                st.markdown("**Pole-figure profiles — texture strength (m.u.d.)**")
+                st.dataframe(pd.DataFrame([{
+                    "Sheet": p["sheet"], "Max MUD": round(p["max_mud"], 3),
+                    "Mean MUD": round(p["mean_mud"], 3),
+                    "Angle at peak (°)": p["angle_at_peak_deg"],
+                } for p in pole]), use_container_width=True, hide_index=True)
+
+            # ── Mackenzie / disorientation ──────────────────────────────────────
+            mack = ref.get("mackenzie", [])
+            if mack:
+                st.markdown("**Mackenzie / disorientation (measured neighbour pairs)**")
+                st.dataframe(pd.DataFrame([{
+                    "Sheet": m["sheet"],
+                    "Mean disorientation (°)": round(m["mean_neighbor_disorientation_deg"], 3),
+                    "Peak angle (°)": m["peak_angle_deg"],
+                    "LAGB fraction (<15°)": round(m["lagb_fraction_lt15deg"], 4)
+                    if m["lagb_fraction_lt15deg"] is not None else None,
+                } for m in mack]), use_container_width=True, hide_index=True)
+
+            st.caption(
+                "This workbook is a **reference/cross-check** derived from an already "
+                "analysed dataset. The app still computes everything from the EBSD map "
+                "you uploaded; workbook values are shown for calibration and comparison.")
+
+# preferred calibration step size from the reference workbook (if any)
+ref_step_um = None
+if ref and ref.get("overview"):
+    ref_step_um = ref["overview"].get("step_size_um")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  PER-FILE TABS
@@ -325,7 +467,16 @@ for fname, df_raw in all_data.items():
                                   kernel_order=1, threshold_deg=kam_thresh)
             return g_df, kam_arr, gids
 
-        step_val = float(meta.get("Step Size (µm)", 0.5))
+        step_meta = meta.get("Step Size (µm)")
+        if step_meta is None and ref_step_um:
+            step_val = float(ref_step_um)
+            st.caption(f"ℹ️ Step size not found in the EBSD file — using reference "
+                       f"workbook value **{step_val:.4g} µm** for grain segmentation.")
+        else:
+            step_val = float(step_meta) if step_meta is not None else 0.5
+            if ref_step_um and step_meta is not None and abs(step_val - ref_step_um) > 1e-4:
+                st.caption(f"ℹ️ Step size — file: **{step_val:.4g} µm**, reference "
+                           f"workbook: **{ref_step_um:.4g} µm** (using file value for segmentation).")
 
         with st.spinner("Segmenting grains and computing KAM… (may take ~30 s for large files)"):
             try:
@@ -699,22 +850,95 @@ for fname, df_raw in all_data.items():
 
             # GND density from KAM
             if kam_col_use and kam_col_use in df.columns:
-                st.subheader("GND Density Estimate (Kubin–Mortensen)")
-                step_gnd = st.number_input(
-                    "Step size (µm)", 0.001, value=float(meta.get("Step Size (µm)",0.5)),
-                    step=0.01, key=f"step_{fname}")
-                b_gnd = st.number_input(
-                    "Burgers vector (nm)", 0.1, value=0.248, step=0.001,
-                    key=f"burg_{fname}",
-                    help="Fe BCC ≈ 0.248 nm | 304/444 stainless ≈ 0.254 nm")
-                kam_rad = np.deg2rad(df[kam_col_use].dropna())
-                u = 1.86e-6 * step_gnd
-                b = b_gnd * 1e-9
-                rho = (2 * kam_rad) / (u * b)
-                ra, rb = st.columns(2)
-                with ra: st.metric("Mean ρ_GND (m⁻²)", f"{rho.mean():.3e}")
+                st.subheader("GND Density Estimate (from KAM)")
+
+                # default step: file value, else reference workbook, else 0.5
+                step_default = meta.get("Step Size (µm)")
+                if step_default is None:
+                    step_default = ref_step_um if ref_step_um else 0.5
+                gc1, gc2, gc3 = st.columns(3)
+                with gc1:
+                    step_gnd = st.number_input(
+                        "Step size u (µm)", 0.001, value=float(step_default),
+                        step=0.01, key=f"step_{fname}",
+                        help="Unit length. Prefilled from the EBSD file, or from the "
+                             "reference workbook if the file has no step size.")
+                with gc2:
+                    b_gnd = st.number_input(
+                        "Burgers vector b (nm)", 0.1, value=0.248, step=0.001,
+                        key=f"burg_{fname}",
+                        help="Fe BCC ≈ 0.248 nm | 304/444 stainless (FCC) ≈ 0.254 nm | "
+                             "Al ≈ 0.286 nm")
+                with gc3:
+                    alpha = st.number_input(
+                        "Method factor α", 0.1, value=1.0, step=0.01,
+                        key=f"alpha_{fname}",
+                        help="ρ_GND = 2·θ_KAM / (α·u·b). α=1 is the standard "
+                             "Kubin–Mortensen / Calcagnotto form. Some workflows use "
+                             "α equal to the kernel size in steps. (This app's earlier "
+                             "version used α≈1.86, which lowered ρ by that factor.)")
+
+                kam_series = df[kam_col_use].dropna()
+                kam_rad = np.deg2rad(kam_series)
+                u = step_gnd * 1e-6          # µm → m
+                b = b_gnd * 1e-9             # nm → m
+                rho = (2.0 * kam_rad) / (alpha * u * b)
+                rho_mean = float(rho.mean())
+
+                ra, rb, rc = st.columns(3)
+                with ra: st.metric("Mean ρ_GND (m⁻²)", f"{rho_mean:.3e}")
                 with rb: st.metric("Std ρ_GND (m⁻²)",  f"{rho.std():.3e}")
-                st.caption("ρ_GND = 2·θ_KAM / (1.86 · step · b)  — Kubin & Mortensen (2003)")
+                with rc: st.metric("Mean KAM θ (°)",   f"{kam_series.mean():.3f}")
+                st.latex(r"\rho_{GND} = \frac{2\,\theta_{KAM}}{\alpha\,u\,b}")
+
+                with st.expander("🔬 Method & assumptions", expanded=False):
+                    st.markdown(f"""
+| Quantity | Value used | Note |
+|---|---|---|
+| θ_KAM | mean **{kam_series.mean():.3f}°** = {np.deg2rad(kam_series.mean()):.3e} rad | converted °→rad with `np.deg2rad` |
+| Step size *u* | **{step_gnd:.4g} µm** = {u:.3e} m | converted µm→m (×1e-6) |
+| Burgers vector *b* | **{b_gnd:.3f} nm** = {b:.3e} m | Fe BCC default 0.248 nm |
+| Method factor α | **{alpha:.3g}** | α=1 → standard 2θ/(u·b) |
+| KAM kernel | order 1, threshold {kam_threshold}° | 1st-neighbour kernel, boundaries >{kam_threshold}° excluded |
+
+**Reference (Kubin & Mortensen 2003; Calcagnotto et al. 2010):**
+ρ_GND = 2·θ_KAM /(u·b), with θ in radians, *u* and *b* in metres.
+This is a **lower-bound** estimate: it captures GNDs resolved by the KAM kernel
+at this step size and ignores statistically-stored dislocations (SSDs).
+""")
+
+                # ── Discrepancy diagnostics ────────────────────────────────────
+                with st.expander("⚠️ Discrepancy diagnostics (why GND values may differ)",
+                                 expanded=False):
+                    rho_std_form = float((2.0 * kam_rad / (u * b)).mean())   # α=1
+                    rho_186 = float((2.0 * kam_rad / (1.86 * u * b)).mean())
+                    st.markdown(f"""
+Common causes of GND / dislocation-density mismatch between tools:
+
+1. **Method factor α** — standard α=1 gives **{rho_std_form:.3e} m⁻²**; using
+   α=1.86 (this app's earlier version) gives **{rho_186:.3e} m⁻²** — a factor of
+   1.86 lower. *If your other tool reported higher values, this factor is the most
+   likely cause.*
+2. **Degree vs radian** — KAM must be in **radians** here (handled: `np.deg2rad`).
+   Forgetting the conversion inflates ρ by ~57×.
+3. **µm vs m** — *u* and *b* must be in **metres** (handled: µm×1e-6, nm×1e-9).
+4. **Burgers vector** — BCC Fe 0.248 nm vs FCC 0.254 nm vs Al 0.286 nm changes ρ inversely.
+5. **KAM kernel / order** — 1st vs 2nd/3rd nearest neighbours and the
+   exclusion threshold ({kam_threshold}°) change the mean KAM and hence ρ.
+6. **Step size** — a coarser step lowers resolved KAM and ρ; make sure *u* matches
+   the true acquisition step (reference workbook: {f'{ref_step_um:.4g} µm' if ref_step_um else 'n/a'}).
+7. **Clean-up / indexing** — non-indexed pixels, grain-boundary exclusion and phase
+   filtering all shift the KAM population.
+""")
+                    if ref and ref.get("grain", {}).get("stats", {}).get("mos_mean"):
+                        mos = ref["grain"]["stats"]["mos_mean"]
+                        st.info(
+                            f"**Reference cross-check (not GND):** the workbook Grain List "
+                            f"reports **Mean Orientation Spread = {mos['mean']:.3f}°** "
+                            f"(median {mos['median']:.3f}°, max attribute {mos['max']:.3f}°). "
+                            f"MOS is a *per-grain intragranular spread* metric and is **not** "
+                            f"the same as KAM or GND, but a much larger app KAM ({kam_series.mean():.3f}°) "
+                            f"vs workbook MOS may indicate kernel/threshold or clean-up differences.")
 
     # ───────────────────────────────────────────────────────────────────────
     # TAB 6 — POLE FIGURES (IPF)

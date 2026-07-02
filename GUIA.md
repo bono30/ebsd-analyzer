@@ -44,6 +44,7 @@ estão no repositório:
 | `ctf_processing.py` | Segmentação de grãos e cálculos (KAM, estatísticas) |
 | `ipf_plots.py` | Gráficos IPF (densidade, triângulo, cubo 3D) |
 | `pf_plots.py` | Figuras de polo e mapa IPF 2D |
+| `excel_reference.py` | Leitura opcional de planilha de referência (.xlsx/.xlsm) |
 | `requirements.txt` | Lista de dependências Python |
 
 Pasta de exemplos (opcional, mas recomendada para testar):
@@ -166,13 +167,83 @@ Checklist antes do push:
 | CTF | `.ctf` | Oxford Instruments / HKL Channel 5 (dados por pixel) |
 | BCF | `.bcf` | Bruker Esprit (se a leitura falhar, exporte como CSV) |
 | CSV / TXT | `.csv`, `.txt` | OIM, AztecCrystal, MTEX, etc. (dados por grão) |
+| Excel (referência) | `.xlsx`, `.xlsm` | Exportação AztecCrystal / ESPRIT — **opcional**, só para calibração/conferência (ver Seção 9) |
 
 Se os nomes das colunas forem diferentes, use o painel **Column mapping**
 dentro do app para indicar manualmente quais colunas usar.
 
 ---
 
-## 9. Problemas comuns
+## 9. Planilha de referência Excel (.xlsx/.xlsm) — opcional
+
+O app aceita, **de forma opcional**, uma planilha de *exportação/pós-processamento*
+de EBSD gerada por softwares comerciais (por exemplo, **Oxford AztecCrystal** ou
+**Bruker ESPRIT**). Não é o mapa EBSD bruto — é uma planilha com resumos já
+calculados: aba `Overview`, `Grain List`, `Boundary Statistics`, histogramas de
+grão, `PolePlotData...` e `MackenziePlot...`.
+
+### Para que serve
+
+Essa planilha **não substitui** a análise do app. Ela é usada para
+**calibração e conferência**:
+
+- **Metadados de aquisição** (`Overview`): *step size* (µm), *pixel count*,
+  *raster*, *hit rate*, *zero solution count* e frações de fase.
+- **Calibração do step size:** se o arquivo EBSD enviado **não** tiver o passo
+  (step size), o app usa o valor da planilha para a segmentação de grãos. Se
+  ambos existirem, o app mostra os dois lado a lado para comparação.
+- **Resumo da `Grain List`:** nº de grãos, contagem por fase e estatísticas de
+  Área, ECD, Max Feret, *Mean/Maximum Orientation Spread*.
+- **`Boundary Statistics`:** comprimento e fração de LAGB (2–10°) e HAGB (>10°).
+- **Textura (`PolePlotData`):** pico e média de m.u.d. e o ângulo do pico.
+- **`MackenziePlot`:** desorientação média medida e fração de LAGB (<15°).
+
+### Como usar (teste com uma planilha real)
+
+1. Abra o app (`streamlit run app.py`).
+2. Na barra lateral, em **Reference workbook (optional)**, clique em
+   **Browse files** e selecione sua planilha `.xlsx` ou `.xlsm`.
+3. Um painel **“Reference workbook summary (Excel)”** aparece no topo com as
+   tabelas de metadados, grãos, contornos, textura e Mackenzie.
+4. Envie também o arquivo EBSD (CTF/CSV) correspondente na parte de cima da
+   barra lateral. Na aba **KAM / Band Contrast**, o painel de GND passa a mostrar
+   o comparativo de step size e o diagnóstico de discrepância.
+
+### Densidade de discordâncias (GND) — honestidade científica
+
+O app calcula a densidade de GND **a partir do KAM** do mapa EBSD, com a fórmula
+
+```
+ρ_GND = 2·θ_KAM / (α · u · b)
+```
+
+onde θ_KAM está em **radianos**, `u` = step size em **metros** (µm × 1e-6),
+`b` = vetor de Burgers em **metros** (nm × 1e-9) e `α` = fator de método.
+
+- **α = 1** é a forma padrão (Kubin & Mortensen 2003; Calcagnotto et al. 2010).
+- Versões anteriores deste app usavam **α ≈ 1,86**, o que **reduzia ρ nesse fator**
+  — provável causa de valores de GND discrepantes (mais baixos) em relação a
+  outras ferramentas. Agora `α` é um campo ajustável e o app mostra os dois
+  valores no diagnóstico.
+- O app **não** substitui seu ρ_GND por um valor da planilha, porque essas
+  planilhas de exportação normalmente **não trazem** um valor de GND. O *Mean
+  Orientation Spread* da `Grain List` é exibido apenas como **referência de
+  espalhamento intragranular** — ele **não** é igual a KAM nem a GND.
+
+### Limitações
+
+- É uma estimativa de **limite inferior** de GND (só as GNDs resolvidas pelo
+  KAM naquele step; ignora SSDs).
+- Nomes de abas truncados pelo Excel são reconhecidos por prefixo; abas muito
+  fora do padrão dos exportadores podem não ser lidas (o app apenas ignora as
+  seções ausentes, sem quebrar).
+- A leitura é **somente de valores** (não executa macros VBA do `.xlsm`).
+- Caminhos absolutos privados presentes na planilha (ex.: `C:\Users\...`) **não**
+  são exibidos — o app mostra apenas o nome do arquivo de origem.
+
+---
+
+## 10. Problemas comuns
 
 | Problema | Solução |
 |---|---|
