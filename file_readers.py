@@ -7,10 +7,30 @@ import io
 import re
 import struct
 import zipfile
-import xml.etree.ElementTree as ET
+from xml.etree.ElementTree import ParseError
+
+import defusedxml.ElementTree as ET
 
 import numpy as np
 import pandas as pd
+
+# Max uncompressed size allowed per BCF (ZIP) member, to guard against
+# decompression-bomb / memory-exhaustion uploads on a shared public server.
+MAX_BCF_MEMBER_BYTES = 50 * 1024 * 1024  # 50 MB
+
+
+def _coerce_numeric(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Convert columns to numeric where possible, leaving non-numeric columns
+    (e.g. phase names) untouched. Replaces the removed pandas
+    `to_numeric(errors="ignore")` behaviour (gone in pandas 3.0).
+    """
+    for c in df.columns:
+        conv = pd.to_numeric(df[c], errors="coerce")
+        # keep the conversion only if it did not turn valid values into NaN
+        if conv.notna().sum() == df[c].notna().sum():
+            df[c] = conv
+    return df
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -220,6 +240,23 @@ BCF_EBSD_CHANNELS = {
 }
 
 
+def _safe_zip_read(zf: zipfile.ZipFile, name: str) -> bytes:
+    """
+    Read a ZIP member only after checking its declared uncompressed size,
+    so a malicious BCF (ZIP) cannot expand to exhaust server memory.
+    Raises ValueError if the member exceeds MAX_BCF_MEMBER_BYTES.
+    """
+    size = zf.getinfo(name).file_size
+    if size > MAX_BCF_MEMBER_BYTES:
+        raise ValueError(
+            f"BCF member '{name}' is too large to process "
+            f"({size / 1024 / 1024:.0f} MB > "
+            f"{MAX_BCF_MEMBER_BYTES // 1024 // 1024} MB limit). "
+            "Please export the data as CSV and upload that instead."
+        )
+    return zf.read(name)
+
+
 def _try_zip_bcf(file_bytes: bytes) -> tuple[pd.DataFrame | None, dict]:
     """
     Attempt to open BCF as a ZIP archive and extract EBSD binary arrays.
@@ -240,7 +277,7 @@ def _try_zip_bcf(file_bytes: bytes) -> tuple[pd.DataFrame | None, dict]:
 
     for xname in xml_candidates:
         try:
-            xml_content = zf.read(xname).decode("utf-8", errors="replace")
+            xml_content = _safe_zip_read(zf, xname).decode("utf-8", errors="replace")
             root = ET.fromstring(xml_content)
 
             # Look for scan dimensions
@@ -277,7 +314,7 @@ def _try_zip_bcf(file_bytes: bytes) -> tuple[pd.DataFrame | None, dict]:
                         phase_map[int(idx_el.text)] = name_el.text
                     except Exception:
                         pass
-        except ET.ParseError:
+        except ParseError:
             pass
 
     # ── Find and read binary data files ──────────────────────────────────────
@@ -291,8 +328,10 @@ def _try_zip_bcf(file_bytes: bytes) -> tuple[pd.DataFrame | None, dict]:
         friendly = BCF_EBSD_CHANNELS.get(stem)
         if friendly is None:
             continue
+        # Size check first, outside the try, so an over-limit member raises a
+        # clear ValueError instead of being silently swallowed below.
+        raw = _safe_zip_read(zf, fname)
         try:
-            raw = zf.read(fname)
             # Try float32 first
             arr = np.frombuffer(raw, dtype=np.float32)
             if width and height and len(arr) == width * height:
@@ -373,7 +412,7 @@ def _try_embedded_csv_bcf(file_bytes: bytes) -> tuple[pd.DataFrame | None, dict]
             engine="python",
             on_bad_lines="skip",
         )
-        df = df.apply(pd.to_numeric, errors="ignore")
+        df = _coerce_numeric(df)
         return df, {"Source Format": "BCF (embedded text data)"}
     except Exception:
         return None, {}
@@ -437,7 +476,7 @@ def load_ebsd_file(file_bytes: bytes, filename: str,
                 on_bad_lines="skip",
             )
             df.columns = df.columns.str.strip()
-            df = df.apply(pd.to_numeric, errors="ignore")
+            df = _coerce_numeric(df)
             meta = {"Source Format": "CSV/Text", "Rows": len(df)}
             return df, meta
         except Exception as e:

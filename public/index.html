@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EBSD Analyzer</title>
+<style>
+  body {
+    margin: 0;
+    background: #ffffff;
+    color: #1a1a1a;
+    font-family: Arial, Helvetica, sans-serif;
+    line-height: 1.6;
+  }
+  .wrap { max-width: 820px; margin: 0 auto; padding: 40px 24px 64px; }
+  h1 { font-size: 28px; margin: 0 0 4px; }
+  .sub { color: #555; margin: 0 0 24px; }
+  h2 { font-size: 19px; margin: 32px 0 10px; border-bottom: 1px solid #ddd; padding-bottom: 6px; }
+  p { margin: 10px 0; }
+  ul { margin: 10px 0; padding-left: 22px; }
+  li { margin: 4px 0; }
+  code { background: #f0f2f5; padding: 2px 6px; border-radius: 4px; font-family: Consolas, monospace; font-size: 14px; }
+  pre { background: #f0f2f5; padding: 12px 14px; border-radius: 6px; overflow-x: auto; }
+  pre code { background: none; padding: 0; }
+  table { width: 100%; border-collapse: collapse; margin: 10px 0; }
+  th, td { text-align: left; padding: 8px 10px; border: 1px solid #ddd; font-size: 14px; }
+  th { background: #f0f2f5; }
+  .btn {
+    display: inline-block;
+    background: #1f77b4;
+    color: #ffffff;
+    text-decoration: none;
+    font-weight: bold;
+    font-size: 17px;
+    padding: 13px 30px;
+    border-radius: 6px;
+    margin: 8px 0;
+  }
+  .note {
+    border-left: 4px solid #f0c14b;
+    background: #fff8e6;
+    padding: 12px 16px;
+    margin: 16px 0;
+    font-size: 14px;
+  }
+  footer { margin-top: 36px; padding-top: 16px; border-top: 1px solid #ddd; color: #777; font-size: 13px; }
+  a { color: #1f77b4; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>EBSD Analyzer</h1>
+  <p class="sub">Analise de dados de EBSD (Electron Backscatter Diffraction) direto no navegador.</p>
+
+  <p><a class="btn" href="/port/5000">Abrir o aplicativo</a></p>
+  <p style="color:#555; font-size:14px;">O aplicativo (Streamlit) roda em <code>/port/5000</code>.
+  Se nao abrir de imediato, aguarde alguns segundos e recarregue a pagina.</p>
+
+  <h2>O que o aplicativo faz</h2>
+  <ul>
+    <li>Distribuicao de tamanho de grao (histograma log-normal, CDF, teste de normalidade)</li>
+    <li>Histograma de desorientacao (LAGB/HAGB, curva de Mackenzie)</li>
+    <li>Resumo de textura e fracoes de orientacoes ideais</li>
+    <li>Deteccao de outliers (IQR / Z-score)</li>
+    <li>KAM e estimativa de densidade de discordancias (GND)</li>
+    <li>Mapas IPF (triangulo, cubo 3D), figuras de polo e exportacao em PNG / SVG / PDF</li>
+  </ul>
+
+  <h2>Arquivos aceitos</h2>
+  <table>
+    <tr><th>Formato</th><th>Extensao</th><th>Origem / nivel</th></tr>
+    <tr><td>CSV / TXT</td><td>.csv, .txt</td><td>OIM, AztecCrystal, MTEX - dados por grao</td></tr>
+    <tr><td>CTF</td><td>.ctf</td><td>Oxford / HKL - dados por pixel</td></tr>
+    <tr><td>BCF</td><td>.bcf</td><td>Bruker Esprit (se falhar, exporte como CSV)</td></tr>
+  </table>
+  <p style="font-size:14px; color:#555;">Se os nomes das colunas forem diferentes, use o painel
+  <strong>Column mapping</strong> dentro do aplicativo.</p>
+
+  <h2>Teste minimo</h2>
+  <ol>
+    <li>Clique em <strong>Abrir o aplicativo</strong>.</li>
+    <li>Na barra lateral, clique em <strong>Browse files</strong>.</li>
+    <li>Envie <code>sample_data/exemplo_graos.csv</code> (dados por grao).</li>
+    <li>Para testar a segmentacao automatica, envie <code>sample_data/exemplo_pixels.ctf</code> (dados por pixel).</li>
+  </ol>
+  <div class="note">
+    <strong>Atencao:</strong> os arquivos de exemplo sao <strong>sinteticos</strong>
+    (gerados por computador) apenas para demonstracao. Nao sao dados experimentais
+    reais e nao devem ser usados como resultado de pesquisa.
+  </div>
+
+  <h2>Privacidade</h2>
+  <div class="note">
+    Esta e uma <strong>demonstracao publica</strong>. Os arquivos enviados sao
+    processados no servidor (em memoria) e nao sao armazenados permanentemente,
+    mas <strong>nao envie dados confidenciais ou ainda nao publicados</strong> para
+    esta instancia publica.
+  </div>
+
+  <h2>Arquivos do repositorio necessarios</h2>
+  <ul>
+    <li><code>app.py</code> - aplicativo principal (ponto de entrada)</li>
+    <li><code>requirements.txt</code> - dependencias Python</li>
+    <li><code>file_readers.py</code> - leitura de CSV / CTF / BCF</li>
+    <li><code>ctf_processing.py</code> - segmentacao de graos, KAM, estatisticas</li>
+    <li><code>ipf_plots.py</code> - graficos IPF (triangulo, cubo 3D)</li>
+    <li><code>pf_plots.py</code> - figuras de polo e mapa IPF 2D</li>
+    <li><code>sample_data/</code> - dados de exemplo (exemplo_graos.csv, exemplo_pixels.ctf)</li>
+  </ul>
+
+  <h2>Atualizacao manual (editar e republicar)</h2>
+  <p>Apos editar os arquivos, atualize o repositorio. O deploy e refeito a partir do novo commit:</p>
+  <pre><code>git add .
+git commit -m "descreva a mudanca"
+git push origin main</code></pre>
+  <p style="font-size:14px;">Guia completo em Portugues:
+  <a href="https://github.com/bono30/ebsd-analyzer/blob/main/GUIA.md">GUIA.md</a> -
+  Repositorio: <a href="https://github.com/bono30/ebsd-analyzer">github.com/bono30/ebsd-analyzer</a></p>
+
+  <footer>EBSD Analyzer - Streamlit - Licenca MIT - Dados de exemplo sinteticos</footer>
+
+</div>
+</body>
+</html>
