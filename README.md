@@ -12,7 +12,7 @@ A local Streamlit app for EBSD (Electron Backscatter Diffraction) data analysis.
 | **Misorientation** | LAGB/HAGB frequency bar chart, Mackenzie random-texture reference curve, fraction 15°–65° |
 | **Texture** | Euler angle distributions, ideal orientation fractions (Cube, Goss, Brass, Gamma fiber), Φ vs φ₂ ODF section |
 | **Outliers** | IQR / Z-score / Modified Z-score detection with boxplots and outlier row table |
-| **KAM / IQ** | KAM distribution, Image Quality histogram, GND density estimate with method/assumptions and discrepancy diagnostics |
+| **KAM / IQ** | KAM distribution, Image Quality histogram, **KAM-derived apparent GND density** (distance-aware gradient with real neighbour distances, phase-aware Burgers vector, optional angular-noise floor and calibration α, regression method, sensitivity table + log-scale histogram) — clearly labelled a lower-bound proxy, not total dislocation density |
 | **3D IPF cube** | Isometric IPF map on three faces (top = IPF-Z, front = IPF-Y, right = IPF-X). *Undistorted cube* (default) draws equal on-screen edges — the true µm extents are printed on the X/Y labels; toggle it off for physical X:Y proportion with a common-length scale bar (same µm on every axis) |
 | **Reference workbook** | Optional `.xlsx/.xlsm` EBSD export (AztecCrystal/ESPRIT) for step-size calibration and cross-checking grain/boundary/texture stats |
 | **Export** | All figures as ZIP (PNG/SVG/PDF at 300 dpi) + individual downloads + stats CSV |
@@ -131,25 +131,50 @@ To regenerate the samples: `python generate_sample.py`.
 
 ---
 
-## GND Density Formula
+## KAM-derived apparent GND density
 
-The **Kernel Average Misorientation (KAM)** method uses the Kubin–Mortensen (2003) /
-Calcagnotto et al. (2010) relation:
+> **This is not the total dislocation density.** The app reports an *apparent,
+> lower-bound* estimate of **geometrically necessary dislocations (GNDs)** resolved
+> by the KAM kernel. It **excludes statistically-stored dislocations (SSDs)** and is
+> strongly **method-dependent** (step size, kernel order, angular noise, clean-up,
+> grain-boundary / phase / quality filtering). Treat it as a *KAM-derived proxy*,
+> never as a measured total dislocation density.
 
-$$\rho_{GND} = \frac{2\,\theta_{KAM}}{\alpha \cdot u \cdot b}$$
+The **Kernel Average Misorientation (KAM)** method (Kubin–Mortensen 2003;
+Calcagnotto et al. 2010) is implemented with **real neighbour distances**:
+
+$$g_i = \frac{\Delta\theta_i}{r_i}, \qquad \rho_{GND}^{KAM} \approx \frac{2}{b}\,\overline{g_i} \;=\; \frac{2\,\theta_{KAM}}{b\,L_{eff}}$$
 
 Where:
-- θ_KAM = local misorientation in **radians** (converted from degrees with `np.deg2rad`)
-- u = step size in **metres** (µm × 1e-6)
-- b = Burgers vector in **metres**: Fe BCC ≈ 0.248 nm, FCC ≈ 0.254 nm, Al ≈ 0.286 nm
-- α = method/geometry factor, **default 1** (standard form)
+- Δθ_i = pair misorientation in **radians**; r_i = **true** centre→neighbour distance
+  in **metres** (axial `u`, diagonals `√2·u`, higher shells `2u`, `√5·u`, `2√2·u`).
+  Diagonals are **not** divided by `u` alone — this was the main earlier error.
+- L_eff = mean included neighbour distance (reported in the UI; usually **> u**), not the step size.
+- b = Burgers vector in **metres**, derived from the lattice parameter and crystal
+  structure: **BCC** `b = (√3/2)·a` (Fe ≈ 0.248 nm), **FCC** `b = a/√2`
+  (austenite ≈ 0.253–0.255 nm), **HCP** `b ≈ a`. Editable per phase.
+- α = **optional** user calibration factor in the denominator, **default 1 and disabled**.
 
-> **Note on discrepant GND values.** Earlier versions of this app used **α ≈ 1.86**,
-> which lowers ρ by that factor and is a common source of mismatch against other
-> tools. α is now an adjustable input, and the **KAM / Band Contrast** tab shows a
-> *discrepancy diagnostics* panel comparing α=1 vs α=1.86 and flagging the usual
-> pitfalls (deg↔rad, µm↔m, Burgers vector, KAM kernel/threshold, step size,
-> clean-up). This estimate is a **lower bound** (resolved GNDs only; ignores SSDs).
+> **Optional calibration factor α.** The default simplified convention uses **no
+> additional calibration factor (α = 1)** — this is a convention, not a fixed
+> standard. α is an advanced, opt-in input (`ρ = 2θ/(α·b·L_eff)`, α in the
+> denominator: α>1 lowers ρ); the UI asks for a reference/justification. Older
+> workflows using **α ≈ 1.86** simply lower ρ by that factor.
+
+**Angular noise floor.** An optional θ_noise (default 0°; conventionally ~0.2–0.5° as
+an order-of-magnitude only) is subtracted per pair before the gradient — *absolute*
+`Δθ' = max(Δθ − θ_noise, 0)` or *rms* `Δθ' = √(max(Δθ² − θ_noise², 0))`. The tab shows
+raw vs noise-corrected ρ **and** the apparent ρ produced by the noise floor **alone**,
+so you can tell when the signal is noise-dominated.
+
+**Methods available:** *Neighbour-gradient* (distance-aware, default), *KAM-mean*
+(`ρ = 2θ/(α·b·L_eff)`), and *Regression-corrected* (fits mean Δθ vs distance and uses
+the slope dθ/du, whose intercept absorbs the noise offset). A **sensitivity table**
+(kernel/threshold/noise/α variants → mean/median/p10/p90/IQR, pixels used, pairs
+excluded) and a **log-scale per-pixel histogram** quantify the method-dependence. All
+estimates are a **lower bound** (resolved GNDs only; ignores SSDs). A note on the
+advanced **Nye-tensor / lattice-curvature** method (more defensible but still 2-D
+lower-bound) is included but not fully implemented.
 
 ### Optional Excel reference workbook
 

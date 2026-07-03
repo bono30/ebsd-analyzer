@@ -15,7 +15,8 @@ arquivo exportado do microscópio e o app gera automaticamente:
 - Histograma de **desorientação** (LAGB/HAGB, curva de Mackenzie)
 - Resumo de **textura** (ângulos de Euler, frações de orientações ideais)
 - Detecção de **outliers** (IQR / Z-score)
-- **KAM** e estimativa de densidade de discordâncias (GND)
+- **KAM** e **densidade aparente de GND estimada a partir do KAM** (limite
+  inferior; não é a densidade total de discordâncias — ver Seção 9)
 - Figuras prontas para publicação (PNG/SVG/PDF, 300 dpi)
 - Visualizações **IPF** (mapa, triângulo, cubo 3D) e **figuras de polo (PF)**
 
@@ -216,26 +217,59 @@ Essa planilha **não substitui** a análise do app. Ela é usada para
    barra lateral. Na aba **KAM / Band Contrast**, o painel de GND passa a mostrar
    o comparativo de step size e o diagnóstico de discrepância.
 
-### Densidade de discordâncias (GND) — honestidade científica
+### Densidade aparente de GND estimada a partir do KAM — honestidade científica
 
-O app calcula a densidade de GND **a partir do KAM** do mapa EBSD, com a fórmula
+> ⚠️ **Isto NÃO é a densidade total de discordâncias.** É uma estimativa
+> *aparente* e de **limite inferior** das **discordâncias geometricamente
+> necessárias (GND)** resolvidas pelo kernel do KAM. **Exclui as discordâncias
+> estatisticamente armazenadas (SSD)** e depende fortemente do método (step,
+> ordem do kernel, ruído angular, limpeza do mapa, filtros de contorno/fase/
+> qualidade). Trate como um *proxy derivado do KAM*, nunca como valor medido.
+
+O app usa a relação KAM (Kubin & Mortensen 2003; Calcagnotto et al. 2010) com
+**distâncias reais aos vizinhos**:
 
 ```
-ρ_GND = 2·θ_KAM / (α · u · b)
+g_i = Δθ_i / r_i        ρ_GND^KAM ≈ (2/b)·média(g_i) = 2·θ_KAM / (b · L_eff)
 ```
 
-onde θ_KAM está em **radianos**, `u` = step size em **metros** (µm × 1e-6),
-`b` = vetor de Burgers em **metros** (nm × 1e-9) e `α` = fator de método.
+- Δθ_i em **radianos**; `r_i` = distância **real** centro→vizinho em **metros**
+  (axial `u`, diagonais `√2·u`, ordens maiores `2u`, `√5·u`, `2√2·u`). As
+  diagonais **não** são divididas só por `u` — esse era o erro principal antes.
+- `L_eff` = distância média real usada (mostrada na tela, em geral **> u**), não
+  o step size.
+- `b` = vetor de Burgers em **metros**, derivado do parâmetro de rede `a` e da
+  estrutura: **CCC/BCC** `b = (√3/2)·a` (Fe ≈ 0,248 nm), **CFC/FCC** `b = a/√2`
+  (austenita ≈ 0,253–0,255 nm), **HC/HCP** `b ≈ a`. Editável por fase.
+- `α` = fator de calibração **opcional** no denominador, **padrão 1 e desativado**.
 
-- **α = 1** é a forma padrão (Kubin & Mortensen 2003; Calcagnotto et al. 2010).
-- Versões anteriores deste app usavam **α ≈ 1,86**, o que **reduzia ρ nesse fator**
-  — provável causa de valores de GND discrepantes (mais baixos) em relação a
-  outras ferramentas. Agora `α` é um campo ajustável e o app mostra os dois
-  valores no diagnóstico.
+- **Convenção padrão: sem fator de calibração adicional (α = 1)** — é uma
+  convenção, não um padrão fixo. `α` é um campo avançado, opcional
+  (`ρ = 2θ/(α·b·L_eff)`, no denominador: α>1 reduz ρ); o app pede uma
+  referência/justificativa. Versões anteriores usavam **α ≈ 1,86**, o que apenas
+  **reduzia ρ nesse fator**.
+- **Piso de ruído angular** θ_noise (padrão 0°; ~0,2–0,5° apenas como ordem de
+  grandeza) é subtraído por par antes do gradiente (*absoluto* ou *rms*). O app
+  mostra ρ bruto vs corrigido **e** a ρ aparente gerada **só pelo ruído** — se
+  forem comparáveis, o sinal é dominado por ruído.
+- **Métodos:** *gradiente por vizinho* (distância-real, padrão), *média-KAM*
+  (`ρ = 2θ/(α·b·L_eff)`) e *regressão* (ajusta Δθ médio vs distância; a inclinação
+  dθ/du reduz a sensibilidade ao ruído). Uma **tabela de sensibilidade** e um
+  **histograma em escala log** por pixel mostram a dependência do método.
 - O app **não** substitui seu ρ_GND por um valor da planilha, porque essas
   planilhas de exportação normalmente **não trazem** um valor de GND. O *Mean
-  Orientation Spread* da `Grain List` é exibido apenas como **referência de
-  espalhamento intragranular** — ele **não** é igual a KAM nem a GND.
+  Orientation Spread* (MOS/GOS) da `Grain List` é apenas **referência de
+  espalhamento intragranular por grão** — é uma métrica **diferente** do KAM
+  (local, entre vizinhos) e **não** valida a GND, mesmo quando os valores diferem.
+
+### Método 2 — curvatura / tensor de Nye (avançado, futuro)
+
+Uma rota mais defensável que uma única média de KAM é o **tensor de densidade de
+discordâncias de Nye** (curvatura da rede). Porém, EBSD 2-D só expõe os gradientes
+no plano (∂/∂x, ∂/∂y); os termos fora do plano (∂/∂z) não são medidos, então mesmo
+o resultado de Nye em 2-D continua **incompleto e um limite inferior**. Não é
+implementado por completo aqui — o app prioriza uma estimativa **honesta e
+claramente rotulada** de GND aparente derivada do KAM.
 
 ### Limitações
 

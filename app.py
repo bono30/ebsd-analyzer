@@ -22,6 +22,7 @@ from excel_reference import parse_reference_workbook
 from ctf_processing import (
     compute_kam, segment_grains,
     compute_grain_stats, compute_grain_misorientation,
+    compute_gnd_from_orientations, burgers_from_lattice,
 )
 from ipf_plots import (
     plot_ipf_density,
@@ -848,97 +849,348 @@ for fname, df_raw in all_data.items():
                                fmt=plot_fmt.lower(), key=f"dl_kam_{fname}")
             st.session_state[f"fig_kam_{fname}"] = fig_k
 
-            # GND density from KAM
+            # ── KAM-derived apparent GND density ───────────────────────────
             if kam_col_use and kam_col_use in df.columns:
-                st.subheader("GND Density Estimate (from KAM)")
+                st.subheader("KAM-derived apparent GND density")
+                st.caption("Densidade aparente de GND estimada a partir do KAM")
+
+                st.warning(
+                    "**This is not the total dislocation density.** It is an "
+                    "*apparent, lower-bound* estimate of **geometrically necessary "
+                    "dislocations (GNDs)** resolved by the KAM kernel. It **excludes "
+                    "statistically-stored dislocations (SSDs)** and is strongly "
+                    "**method-dependent**: it changes with step size, kernel order, "
+                    "angular noise, map clean-up, and grain-boundary / phase / quality "
+                    "filtering. Treat it as a *KAM-derived proxy*, not a measured value.")
+
+                # Is a real pixel map available for the distance-aware gradient?
+                x_col_g = find_col(df, ["x", "x position", "x_position"])
+                y_col_g = find_col(df, ["y", "y position", "y_position"])
+                have_map = bool(is_pixel_data and e1_col and e2_col and e3_col
+                                and x_col_g and y_col_g)
 
                 # default step: file value, else reference workbook, else 0.5
                 step_default = meta.get("Step Size (µm)")
                 if step_default is None:
                     step_default = ref_step_um if ref_step_um else 0.5
-                gc1, gc2, gc3 = st.columns(3)
-                with gc1:
+
+                # ── Phase-aware Burgers vector ──────────────────────────────
+                struct_defaults = {
+                    "BCC (ferrite / martensite, Fe)": ("BCC", 0.2866),
+                    "FCC (austenite / Al / Cu)":      ("FCC", 0.3595),
+                    "HCP (Ti / Mg / Zn)":             ("HCP", 0.2950),
+                    "Custom":                          ("BCC", 0.2866),
+                }
+                bc1, bc2, bc3 = st.columns(3)
+                with bc1:
+                    struct_key = st.selectbox(
+                        "Crystal structure", list(struct_defaults.keys()),
+                        index=0, key=f"struct_{fname}",
+                        help="Sets how b is derived from the lattice parameter a: "
+                             "BCC b=√3/2·a (½⟨111⟩), FCC b=a/√2 (½⟨110⟩), HCP b≈a. "
+                             "Edit these examples to match your material — they are "
+                             "not hidden assumptions.")
+                    structure, a_default = struct_defaults[struct_key]
+                with bc2:
+                    a_nm = st.number_input(
+                        "Lattice parameter a (nm)", 0.10, value=float(a_default),
+                        step=0.0001, format="%.4f", key=f"a_{fname}",
+                        help="Editable example. BCC Fe≈0.2866 · FCC austenite≈0.358–0.360 · "
+                             "Al≈0.4050 (b≈0.286) · Ti(HCP)≈0.295.")
+                with bc3:
+                    b_from_a = burgers_from_lattice(a_nm, structure)  # metres
+                    b_override = st.number_input(
+                        "…or Burgers vector b (nm)", 0.05, value=float(b_from_a * 1e9),
+                        step=0.001, format="%.4f", key=f"burg_{fname}",
+                        help="Auto-filled from a and structure; edit to override directly.")
+                b = float(b_override) * 1e-9   # nm → m
+                b_nm = b * 1e9
+
+                sc1, sc2, sc3 = st.columns(3)
+                with sc1:
                     step_gnd = st.number_input(
                         "Step size u (µm)", 0.001, value=float(step_default),
                         step=0.01, key=f"step_{fname}",
-                        help="Unit length. Prefilled from the EBSD file, or from the "
-                             "reference workbook if the file has no step size.")
-                with gc2:
-                    b_gnd = st.number_input(
-                        "Burgers vector b (nm)", 0.1, value=0.248, step=0.001,
-                        key=f"burg_{fname}",
-                        help="Fe BCC ≈ 0.248 nm | 304/444 stainless (FCC) ≈ 0.254 nm | "
-                             "Al ≈ 0.286 nm")
-                with gc3:
-                    alpha = st.number_input(
-                        "Method factor α", 0.1, value=1.0, step=0.01,
-                        key=f"alpha_{fname}",
-                        help="ρ_GND = 2·θ_KAM / (α·u·b). α=1 is the standard "
-                             "Kubin–Mortensen / Calcagnotto form. Some workflows use "
-                             "α equal to the kernel size in steps. (This app's earlier "
-                             "version used α≈1.86, which lowered ρ by that factor.)")
+                        help="Acquisition step. Prefilled from the EBSD file, or the "
+                             "reference workbook if the file has none. Used directly "
+                             "only in the KAM-mean fallback; the gradient method uses "
+                             "real neighbour distances (incl. √2·u diagonals).")
+                with sc2:
+                    noise_deg = st.number_input(
+                        "Angular noise floor θ_noise (°)", 0.0, value=0.0,
+                        step=0.05, format="%.2f", key=f"noise_{fname}",
+                        help="Subtracted from each pair misorientation before the "
+                             "gradient. Default 0. As an order-of-magnitude only, "
+                             "conventional EBSD angular noise is often ~0.2–0.5° "
+                             "(instrument/step dependent — not a fixed constant).")
+                with sc3:
+                    noise_mode = st.selectbox(
+                        "Noise subtraction", ["absolute", "rms"], index=0,
+                        key=f"noisemode_{fname}",
+                        help="absolute: Δθ' = max(Δθ − θ_noise, 0). "
+                             "rms: Δθ' = √(max(Δθ² − θ_noise², 0)).")
 
-                kam_series = df[kam_col_use].dropna()
-                kam_rad = np.deg2rad(kam_series)
-                u = step_gnd * 1e-6          # µm → m
-                b = b_gnd * 1e-9             # nm → m
-                rho = (2.0 * kam_rad) / (alpha * u * b)
-                rho_mean = float(rho.mean())
+                method = st.selectbox(
+                    "Method",
+                    ["Neighbour-gradient (distance-aware)",
+                     "KAM-mean  ρ = 2θ/(α·b·L_eff)",
+                     "Regression-corrected gradient"],
+                    index=0, key=f"gndmethod_{fname}",
+                    help="Neighbour-gradient uses g_i=Δθ_i/r_i with the true distance "
+                         "to each neighbour (diagonals √2·u, higher orders). "
+                         "Regression fits mean Δθ vs distance and uses the slope "
+                         "dθ/du, which reduces angular-noise offset sensitivity.")
 
-                ra, rb, rc = st.columns(3)
-                with ra: st.metric("Mean ρ_GND (m⁻²)", f"{rho_mean:.3e}")
-                with rb: st.metric("Std ρ_GND (m⁻²)",  f"{rho.std():.3e}")
-                with rc: st.metric("Mean KAM θ (°)",   f"{kam_series.mean():.3f}")
-                st.latex(r"\rho_{GND} = \frac{2\,\theta_{KAM}}{\alpha\,u\,b}")
+                kernel_g = 2 if "Regression" in method or "L_eff" in method else 1
+                # allow user to raise kernel order for the gradient/regression
+                kernel_g = st.radio(
+                    "Kernel order (neighbour shells)", [1, 2], index=0,
+                    horizontal=True, key=f"kernord_{fname}",
+                    help="1 = 3×3 (8 neighbours: 4 axial at u, 4 diagonal at √2·u). "
+                         "2 = 5×5, adds farther shells (2u, √5·u, 2√2·u) — needed "
+                         "for the regression slope and distance-corrected variants.")
+
+                # ── Optional calibration factor α (OFF by default) ──────────
+                use_alpha = st.checkbox(
+                    "Enable optional calibration factor α (advanced)",
+                    value=False, key=f"usealpha_{fname}",
+                    help="Off by default. The default simplified convention uses NO "
+                         "additional calibration factor (α = 1). α is a user-defined "
+                         "calibration you must justify — it is NOT a fixed scientific "
+                         "standard. It sits in the denominator: ρ = 2θ/(α·b·L_eff).")
+                alpha = 1.0
+                alpha_note = ""
+                if use_alpha:
+                    ac1, ac2 = st.columns([1, 2])
+                    with ac1:
+                        alpha = st.number_input(
+                            "α (denominator)", 0.1, value=1.0, step=0.01,
+                            key=f"alpha_{fname}",
+                            help="ρ = 2θ/(α·b·L_eff). α>1 lowers ρ; α<1 raises it. "
+                                 "(Some older workflows used α≈1.86 — this is a "
+                                 "convention choice, not a standard.)")
+                    with ac2:
+                        alpha_note = st.text_input(
+                            "Reference / justification for α (required)",
+                            value="", key=f"alpharef_{fname}",
+                            help="Cite the paper/convention you are following.")
+                    if not alpha_note.strip():
+                        st.info("α is enabled — please record a reference/justification "
+                                "above. Until then it is applied as entered.")
+
+                if not have_map:
+                    st.info("No pixel-level map (X/Y + Euler) available, so the "
+                            "distance-aware gradient cannot be computed. Falling back "
+                            "to the **KAM-mean** convention with L_eff ≈ step size. "
+                            "Upload a CTF/CSV pixel map for the gradient/regression "
+                            "methods.")
+
+                # ── Compute ────────────────────────────────────────────────
+                if have_map:
+                    g_df = df[[e1_col, e2_col, e3_col, x_col_g, y_col_g]
+                              + ([phase_col] if phase_col and phase_col in df.columns else [])].dropna()
+                    ph_arr = g_df[phase_col].values if (phase_col and phase_col in g_df.columns) else None
+                    excl_pb = st.checkbox(
+                        "Exclude neighbour pairs that cross a phase boundary",
+                        value=bool(ph_arr is not None), key=f"exclpb_{fname}",
+                        disabled=ph_arr is None,
+                        help="Available when a Phase column is mapped. Grain boundaries "
+                             "are already excluded by the KAM threshold below.")
+                    res = compute_gnd_from_orientations(
+                        g_df, e1_col, e2_col, e3_col, x_col_g, y_col_g,
+                        b_m=b, kernel_order=int(kernel_g),
+                        threshold_deg=float(kam_threshold),
+                        noise_deg=float(noise_deg), noise_mode=noise_mode,
+                        alpha=float(alpha), phase_arr=ph_arr,
+                        exclude_phase_boundaries=bool(excl_pb),
+                        step_x_um=float(step_gnd), step_y_um=float(step_gnd))
+                    L_eff = res["L_eff_m"]
+                    rho_px = res["rho_pixel"]
+                    rho_px_raw = res["rho_pixel_raw"]
+                    if "Regression" in method and res["regression"]:
+                        rho_primary = res["regression"]["rho"]
+                        rho_series = pd.Series(rho_px).dropna()
+                    elif "KAM-mean" in method:
+                        kam_mean_deg = float(np.nanmean(res["kam_deg"]))
+                        rho_primary = (2.0 * np.deg2rad(kam_mean_deg)) / (alpha * b * L_eff)
+                        rho_series = pd.Series(rho_px).dropna()
+                    else:
+                        rho_series = pd.Series(rho_px).dropna()
+                        rho_primary = float(rho_series.mean())
+                    kam_mean_show = float(np.nanmean(res["kam_deg"]))
+                else:
+                    # KAM-mean fallback on the precomputed KAM column
+                    kam_series = df[kam_col_use].dropna()
+                    L_eff = float(step_gnd) * 1e-6
+                    kam_mean_show = float(kam_series.mean())
+                    rho_series = (2.0 * np.deg2rad(kam_series)) / (alpha * b * L_eff)
+                    rho_primary = float(rho_series.mean())
+                    res = {"frac_pixels_used": np.nan, "frac_excluded_threshold": np.nan,
+                           "noise_only_rho": 0.0, "regression": None,
+                           "rho_pixel_raw": rho_series.values}
+
+                # ── Result metrics ─────────────────────────────────────────
+                m1, m2, m3, m4 = st.columns(4)
+                with m1: st.metric("Apparent ρ_GND (m⁻²)", f"{rho_primary:.3e}")
+                with m2: st.metric("Median ρ_GND (m⁻²)", f"{float(np.nanmedian(rho_series)):.3e}"
+                                   if len(rho_series) else "n/a")
+                with m3: st.metric("Mean KAM θ (°)", f"{kam_mean_show:.3f}")
+                with m4: st.metric("L_eff (µm)", f"{L_eff*1e6:.4g}")
+
+                # Equation shown with the actual α placement
+                if use_alpha:
+                    st.latex(r"\rho_{GND}^{KAM} = \frac{2\,\theta_{KAM}}{\alpha\,b\,L_{eff}}"
+                             r"\qquad g_i = \frac{\Delta\theta_i}{r_i},\;"
+                             r"\rho = \frac{2}{\alpha b}\,\overline{g_i}")
+                else:
+                    st.latex(r"\rho_{GND}^{KAM} = \frac{2\,\theta_{KAM}}{b\,L_{eff}}"
+                             r"\qquad g_i = \frac{\Delta\theta_i}{r_i},\;"
+                             r"\rho = \frac{2}{b}\,\overline{g_i}")
+                st.caption(
+                    ("Default simplified convention: **no additional calibration "
+                     "factor (α = 1)**. " if not use_alpha else
+                     f"Calibration factor **α = {alpha:g}** applied in the denominator"
+                     + (f" (ref: {alpha_note})" if alpha_note.strip() else "") + ". ")
+                    + "θ in radians, b and L_eff in metres. The gradient method divides "
+                    "each pair by its **real** distance r_i (diagonals = √2·u), not by u alone.")
+
+                # ── Raw vs noise-corrected ─────────────────────────────────
+                if noise_deg > 0:
+                    rho_raw_mean = float(np.nanmean(res["rho_pixel_raw"]))
+                    nn1, nn2, nn3 = st.columns(3)
+                    with nn1: st.metric("ρ_GND raw (no noise corr.)", f"{rho_raw_mean:.3e}")
+                    with nn2: st.metric("ρ_GND noise-corrected", f"{float(np.nanmean(rho_series)):.3e}"
+                                        if len(rho_series) else "n/a")
+                    with nn3: st.metric("ρ from noise floor alone", f"{res['noise_only_rho']:.3e}")
+                    st.caption(f"Apparent GND produced by θ_noise = {noise_deg:.2f}° alone at "
+                               f"L_eff = {L_eff*1e6:.4g} µm is **{res['noise_only_rho']:.3e} m⁻²** — "
+                               "if this is comparable to your result, the signal is noise-dominated.")
 
                 with st.expander("🔬 Method & assumptions", expanded=False):
                     st.markdown(f"""
 | Quantity | Value used | Note |
 |---|---|---|
-| θ_KAM | mean **{kam_series.mean():.3f}°** = {np.deg2rad(kam_series.mean()):.3e} rad | converted °→rad with `np.deg2rad` |
-| Step size *u* | **{step_gnd:.4g} µm** = {u:.3e} m | converted µm→m (×1e-6) |
-| Burgers vector *b* | **{b_gnd:.3f} nm** = {b:.3e} m | Fe BCC default 0.248 nm |
-| Method factor α | **{alpha:.3g}** | α=1 → standard 2θ/(u·b) |
-| KAM kernel | order 1, threshold {kam_threshold}° | 1st-neighbour kernel, boundaries >{kam_threshold}° excluded |
+| Mean KAM θ | **{kam_mean_show:.3f}°** = {np.deg2rad(kam_mean_show):.3e} rad | pairs ≤ threshold only |
+| Structure / a | **{structure}**, a = {a_nm:.4f} nm | b = {'√3/2·a' if structure=='BCC' else 'a/√2' if structure=='FCC' else 'a'} |
+| Burgers vector b | **{b_nm:.4f} nm** = {b:.3e} m | editable example — set per your phase |
+| L_eff | **{L_eff*1e6:.4g} µm** = {L_eff:.3e} m | mean **real** neighbour distance used (not just u) |
+| Step size u | **{step_gnd:.4g} µm** | acquisition step (KAM-mean fallback uses L_eff≈u) |
+| Kernel / threshold | order {int(kernel_g)}, ≤ {kam_threshold}° | boundaries > {kam_threshold}° excluded |
+| Calibration α | **{alpha:g}** ({'enabled' if use_alpha else 'default, none'}) | denominator: 2θ/(α·b·L_eff) |
+| Noise floor | **{noise_deg:.2f}°** ({noise_mode}) | Δθ corrected per pair before gradient |
+| Pixels used | **{(res['frac_pixels_used']*100):.1f}%** | fraction with ≥1 valid neighbour |
+| Pairs excluded by threshold | **{(res['frac_excluded_threshold']*100):.1f}%** | treated as grain boundaries |
 
-**Reference (Kubin & Mortensen 2003; Calcagnotto et al. 2010):**
-ρ_GND = 2·θ_KAM /(u·b), with θ in radians, *u* and *b* in metres.
-This is a **lower-bound** estimate: it captures GNDs resolved by the KAM kernel
-at this step size and ignores statistically-stored dislocations (SSDs).
+**Reference form (Kubin & Mortensen 2003; Calcagnotto et al. 2010):**
+ρ_GND ≈ 2·θ/(b·L_eff). This is a **lower-bound / partial proxy**: only GNDs
+resolved by the kernel at this step are captured; SSDs are ignored.
 """)
+                    if res.get("regression"):
+                        rg = res["regression"]
+                        st.markdown(
+                            f"**Regression-corrected gradient:** slope dθ/du = "
+                            f"{rg['slope_rad_per_m']:.3e} rad/m, intercept = "
+                            f"{rg['intercept_rad']:.3e} rad "
+                            f"(≈ angular-noise offset), giving ρ = **{rg['rho']:.3e} m⁻²**. "
+                            "The intercept absorbs the noise floor, so the slope-based ρ "
+                            "is less sensitive to angular noise than the raw KAM mean.")
 
-                # ── Discrepancy diagnostics ────────────────────────────────────
-                with st.expander("⚠️ Discrepancy diagnostics (why GND values may differ)",
+                # ── MOS / GOS clarification (fixed) ────────────────────────
+                if ref and ref.get("grain", {}).get("stats", {}).get("mos_mean"):
+                    mos = ref["grain"]["stats"]["mos_mean"]
+                    rel = ("lower than" if kam_mean_show < mos['mean']
+                           else "higher than" if kam_mean_show > mos['mean'] else "similar to")
+                    st.info(
+                        f"**Reference cross-check (not a GND validation).** The workbook "
+                        f"Grain List reports **Mean Orientation Spread = {mos['mean']:.3f}°** "
+                        f"(median {mos['median']:.3f}°). The app's mean **KAM = "
+                        f"{kam_mean_show:.3f}°** is {rel} MOS. These are *different metrics* "
+                        f"and need not match: **KAM** is a *local* first/near-neighbour "
+                        f"misorientation, while **MOS/GOS** is a *grain-level* spread of "
+                        f"orientations about the grain's mean/reference. Neither directly "
+                        f"validates a GND density.")
+
+                # ── Sensitivity / uncertainty table ────────────────────────
+                if have_map and st.checkbox(
+                        "Compute sensitivity / uncertainty table (extra passes — slower)",
+                        value=False, key=f"sens_{fname}"):
+                    with st.spinner("Running sensitivity conditions…"):
+                        conditions = [
+                            ("Gradient, kernel 1, thr 2°", dict(kernel_order=1, threshold_deg=2.0, noise_deg=0.0)),
+                            ("Gradient, kernel 1, thr 5°", dict(kernel_order=1, threshold_deg=5.0, noise_deg=0.0)),
+                            ("Gradient, kernel 2 (dist-corr)", dict(kernel_order=2, threshold_deg=float(kam_threshold), noise_deg=0.0)),
+                            ("Raw gradient (current settings)", dict(kernel_order=int(kernel_g), threshold_deg=float(kam_threshold), noise_deg=0.0)),
+                        ]
+                        if noise_deg > 0:
+                            conditions.append((f"Noise-corrected ({noise_deg:.2f}°)",
+                                               dict(kernel_order=int(kernel_g), threshold_deg=float(kam_threshold), noise_deg=float(noise_deg))))
+                        if use_alpha:
+                            conditions.append((f"With α={alpha:g}",
+                                               dict(kernel_order=int(kernel_g), threshold_deg=float(kam_threshold), noise_deg=float(noise_deg), alpha=float(alpha))))
+                        rows = []
+                        for name, kw in conditions:
+                            kw.setdefault("alpha", 1.0)
+                            r = compute_gnd_from_orientations(
+                                g_df, e1_col, e2_col, e3_col, x_col_g, y_col_g,
+                                b_m=b, noise_mode=noise_mode, phase_arr=ph_arr,
+                                exclude_phase_boundaries=bool(excl_pb),
+                                step_x_um=float(step_gnd), step_y_um=float(step_gnd), **kw)
+                            rp = pd.Series(r["rho_pixel"]).dropna()
+                            if len(rp) == 0:
+                                continue
+                            rows.append({
+                                "Condition": name,
+                                "ρ mean (m⁻²)":  f"{rp.mean():.3e}",
+                                "ρ median (m⁻²)": f"{rp.median():.3e}",
+                                "p10 (m⁻²)": f"{rp.quantile(0.10):.3e}",
+                                "p90 (m⁻²)": f"{rp.quantile(0.90):.3e}",
+                                "IQR (m⁻²)": f"{(rp.quantile(0.75)-rp.quantile(0.25)):.3e}",
+                                "L_eff (µm)": f"{r['L_eff_m']*1e6:.4g}",
+                                "Pixels used": f"{r['frac_pixels_used']*100:.1f}%",
+                                "Excl. by thr.": f"{r['frac_excluded_threshold']*100:.1f}%",
+                            })
+                        if rows:
+                            st.dataframe(pd.DataFrame(rows), use_container_width=True)
+                            st.caption("Each row is a full recomputation. Spread across "
+                                       "conditions reflects the method-dependence of the "
+                                       "estimate — not experimental uncertainty alone.")
+
+                    # Log-scale histogram of per-pixel apparent GND
+                    rp_all = pd.Series(rho_px).dropna()
+                    rp_all = rp_all[rp_all > 0]
+                    if len(rp_all) > 10:
+                        fig_g, ax_g = plt.subplots(figsize=(6, 4))
+                        logbins = np.logspace(np.log10(rp_all.min()),
+                                              np.log10(rp_all.max()), 50)
+                        ax_g.hist(rp_all, bins=logbins, color=PAL["purple"],
+                                  edgecolor="white", lw=0.4, alpha=0.85)
+                        ax_g.set_xscale("log")
+                        ax_g.set_xlabel("Apparent ρ_GND per pixel (m⁻²)")
+                        ax_g.set_ylabel("Pixel count")
+                        ax_g.set_title("Per-pixel apparent GND density (log scale)")
+                        ax_g.axvline(rp_all.median(), color=PAL["red"], ls="--", lw=1.5,
+                                     label=f"median = {rp_all.median():.2e}")
+                        ax_g.legend()
+                        fig_g.tight_layout(); st.pyplot(fig_g)
+                        st_figure_download(fig_g, f"gnd_hist_{fname.rsplit('.',1)[0]}",
+                                           fmt=plot_fmt.lower(), key=f"dl_gndhist_{fname}")
+
+                # ── Advanced method note ───────────────────────────────────
+                with st.expander("🧭 Method 2 — curvature / Nye tensor (advanced, future)",
                                  expanded=False):
-                    rho_std_form = float((2.0 * kam_rad / (u * b)).mean())   # α=1
-                    rho_186 = float((2.0 * kam_rad / (1.86 * u * b)).mean())
-                    st.markdown(f"""
-Common causes of GND / dislocation-density mismatch between tools:
-
-1. **Method factor α** — standard α=1 gives **{rho_std_form:.3e} m⁻²**; using
-   α=1.86 (this app's earlier version) gives **{rho_186:.3e} m⁻²** — a factor of
-   1.86 lower. *If your other tool reported higher values, this factor is the most
-   likely cause.*
-2. **Degree vs radian** — KAM must be in **radians** here (handled: `np.deg2rad`).
-   Forgetting the conversion inflates ρ by ~57×.
-3. **µm vs m** — *u* and *b* must be in **metres** (handled: µm×1e-6, nm×1e-9).
-4. **Burgers vector** — BCC Fe 0.248 nm vs FCC 0.254 nm vs Al 0.286 nm changes ρ inversely.
-5. **KAM kernel / order** — 1st vs 2nd/3rd nearest neighbours and the
-   exclusion threshold ({kam_threshold}°) change the mean KAM and hence ρ.
-6. **Step size** — a coarser step lowers resolved KAM and ρ; make sure *u* matches
-   the true acquisition step (reference workbook: {f'{ref_step_um:.4g} µm' if ref_step_um else 'n/a'}).
-7. **Clean-up / indexing** — non-indexed pixels, grain-boundary exclusion and phase
-   filtering all shift the KAM population.
-""")
-                    if ref and ref.get("grain", {}).get("stats", {}).get("mos_mean"):
-                        mos = ref["grain"]["stats"]["mos_mean"]
-                        st.info(
-                            f"**Reference cross-check (not GND):** the workbook Grain List "
-                            f"reports **Mean Orientation Spread = {mos['mean']:.3f}°** "
-                            f"(median {mos['median']:.3f}°, max attribute {mos['max']:.3f}°). "
-                            f"MOS is a *per-grain intragranular spread* metric and is **not** "
-                            f"the same as KAM or GND, but a much larger app KAM ({kam_series.mean():.3f}°) "
-                            f"vs workbook MOS may indicate kernel/threshold or clean-up differences.")
+                    st.markdown(
+                        "A more defensible route than a single averaged KAM is the "
+                        "**lattice-curvature / Nye dislocation-density tensor** approach: "
+                        "the measured orientation gradients populate components of the Nye "
+                        "tensor α_ij, from which a GND density is obtained (e.g. an L1/L2 "
+                        "minimisation over candidate slip systems). It is less sensitive to "
+                        "arbitrary kernel choices than a scalar KAM average.\n\n"
+                        "**However**, 2-D EBSD only exposes the in-plane gradients "
+                        "(∂/∂x, ∂/∂y); the out-of-plane terms (∂/∂z) are unmeasured, so even "
+                        "the Nye-tensor result on a 2-D map remains **incomplete and a "
+                        "lower bound**. Full implementation (3-D or HR-EBSD) is out of scope "
+                        "here; this app prioritises an honest, clearly-labelled "
+                        "**KAM-derived apparent GND** estimate.")
 
     # ───────────────────────────────────────────────────────────────────────
     # TAB 6 — POLE FIGURES (IPF)

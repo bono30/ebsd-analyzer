@@ -184,6 +184,227 @@ def compute_kam(df: pd.DataFrame,
     return kam_out
 
 
+# ── Burgers vector from lattice parameter ─────────────────────────────────────
+
+def burgers_from_lattice(a_nm: float, structure: str = "BCC") -> float:
+    """
+    Shortest lattice Burgers vector length (in metres) from the cubic lattice
+    parameter ``a_nm`` (nm).
+
+        BCC: b = (√3 / 2) · a   (½<111> slip)
+        FCC: b = a / √2         (½<110> slip)
+
+    Any other/unknown ``structure`` falls back to the FCC expression and the
+    caller should treat the value as an editable example, not a fixed truth.
+    """
+    a_m = float(a_nm) * 1e-9
+    s = (structure or "").strip().upper()
+    if s.startswith("BCC"):
+        return (np.sqrt(3.0) / 2.0) * a_m
+    if s.startswith("FCC"):
+        return a_m / np.sqrt(2.0)
+    if s.startswith("HCP"):
+        # For HCP the a-parameter itself is the basal <a> Burgers vector.
+        return a_m
+    return a_m / np.sqrt(2.0)
+
+
+# ── KAM-derived apparent GND density (distance-aware) ─────────────────────────
+
+def compute_gnd_from_orientations(df: pd.DataFrame,
+                                   phi1_col: str, Phi_col: str, phi2_col: str,
+                                   x_col: str, y_col: str,
+                                   b_m: float,
+                                   kernel_order: int = 1,
+                                   threshold_deg: float = 5.0,
+                                   noise_deg: float = 0.0,
+                                   noise_mode: str = "absolute",
+                                   alpha: float = 1.0,
+                                   phase_arr=None,
+                                   exclude_phase_boundaries: bool = False,
+                                   step_x_um: float = None,
+                                   step_y_um: float = None) -> dict:
+    """
+    Estimate the **KAM-derived apparent GND density** from pixel-level
+    orientation data using the real centre→neighbour distances (including
+    diagonals √2·u and higher-order offsets), instead of dividing a single
+    averaged KAM by the axial step size only.
+
+    Per valid neighbour pair the local orientation gradient is
+
+        g_i = Δθ_i / r_i            (Δθ in radians, r_i in metres)
+
+    and the per-pixel apparent GND density is
+
+        ρ_GND ≈ (2 / (α·b)) · mean_i(g_i)
+
+    which reduces to ρ = 2·θ / (α·b·L_eff) for the simple KAM-mean variant,
+    where L_eff is the mean included neighbour distance (NOT necessarily u).
+
+    Noise correction (when ``noise_deg`` > 0) is applied per pair before the
+    gradient:  absolute → Δθ' = max(Δθ − θ_noise, 0);
+               rms      → Δθ' = sqrt(max(Δθ² − θ_noise², 0)).
+
+    Returns a dict of arrays/scalars (see keys assembled at the end). All ρ
+    values are in m⁻². This is a lower-bound / partial proxy: it captures only
+    the GNDs resolved by the kernel at this step and ignores SSDs.
+    """
+    N = len(df)
+    nan_ret = {
+        "rho_pixel": np.full(N, np.nan),
+        "rho_pixel_raw": np.full(N, np.nan),
+        "kam_deg": np.full(N, np.nan),
+        "n_used": np.zeros(N, dtype=int),
+        "L_eff_m": np.nan,
+        "frac_excluded_threshold": np.nan,
+        "frac_pixels_used": 0.0,
+        "regression": None,
+        "noise_only_rho": np.nan,
+        "step_x_um": np.nan, "step_y_um": np.nan,
+    }
+    if x_col not in df.columns or y_col not in df.columns:
+        return nan_ret
+
+    xs = df[x_col].values
+    ys = df[y_col].values
+    ux = np.sort(np.unique(xs))
+    uy = np.sort(np.unique(ys))
+    if len(ux) < 2 or len(uy) < 2:
+        return nan_ret
+
+    step_x = float(step_x_um) if step_x_um else float(np.median(np.diff(ux)))
+    step_y = float(step_y_um) if step_y_um else float(np.median(np.diff(uy)))
+    sxm = step_x * 1e-6
+    sym = step_y * 1e-6
+
+    x_idx = np.round((xs - xs.min()) / step_x).astype(int)
+    y_idx = np.round((ys - ys.min()) / step_y).astype(int)
+    nrows = y_idx.max() + 1
+    ncols = x_idx.max() + 1
+
+    grid = np.full((nrows, ncols), -1, dtype=int)
+    grid[y_idx, x_idx] = np.arange(N)
+
+    R_all = euler_to_matrix(df[phi1_col].values, df[Phi_col].values, df[phi2_col].values)
+
+    ph = None
+    if phase_arr is not None and exclude_phase_boundaries:
+        ph = np.asarray(phase_arr)
+
+    noise_rad = np.deg2rad(max(0.0, float(noise_deg)))
+
+    grad_sum      = np.zeros(N)   # noise-corrected Σ g_i (rad/m)
+    grad_sum_raw  = np.zeros(N)   # raw Σ g_i (rad/m)
+    grad_cnt      = np.zeros(N, dtype=int)
+    kam_sum       = np.zeros(N)   # Σ Δθ (deg), below threshold
+    r_sum         = np.zeros(N)   # Σ r_i (m), for L_eff
+    total_pairs   = np.zeros(N, dtype=int)
+    excl_thresh   = np.zeros(N, dtype=int)
+
+    # Regression accumulators keyed by rounded distance (m)
+    reg_ang = {}   # dist_m -> Σ Δθ (rad, raw, below threshold)
+    reg_cnt = {}
+
+    offsets = [(dr, dc)
+               for dr in range(-kernel_order, kernel_order + 1)
+               for dc in range(-kernel_order, kernel_order + 1)
+               if not (dr == 0 and dc == 0)]
+
+    for dr, dc in offsets:
+        r_i = np.sqrt((dr * sym) ** 2 + (dc * sxm) ** 2)  # metres
+        if r_i <= 0:
+            continue
+        r0 = max(0, -dr);  r1 = nrows - max(0, dr)
+        c0 = max(0, -dc);  c1 = ncols - max(0, dc)
+        r0n = max(0, dr);  r1n = nrows - max(0, -dr)
+        c0n = max(0, dc);  c1n = ncols - max(0, -dc)
+
+        center_idx = grid[r0:r1, c0:c1].ravel()
+        neigh_idx  = grid[r0n:r1n, c0n:c1n].ravel()
+        valid = (center_idx >= 0) & (neigh_idx >= 0)
+        ci = center_idx[valid]; ni = neigh_idx[valid]
+        if len(ci) == 0:
+            continue
+        if ph is not None:
+            same_phase = ph[ci] == ph[ni]
+            ci = ci[same_phase]; ni = ni[same_phase]
+            if len(ci) == 0:
+                continue
+
+        angles = misorientation_angle(R_all[ci], R_all[ni])  # degrees
+        np.add.at(total_pairs, ci, 1)
+
+        below = angles <= threshold_deg
+        np.add.at(excl_thresh, ci[~below], 1)
+        ci_b = ci[below]; ang_b = angles[below]
+        if len(ci_b) == 0:
+            continue
+
+        ang_rad = np.deg2rad(ang_b)
+        # Noise correction
+        if noise_rad > 0:
+            if noise_mode == "rms":
+                ang_corr = np.sqrt(np.clip(ang_rad**2 - noise_rad**2, 0.0, None))
+            else:
+                ang_corr = np.clip(ang_rad - noise_rad, 0.0, None)
+        else:
+            ang_corr = ang_rad
+
+        np.add.at(grad_sum,     ci_b, ang_corr / r_i)
+        np.add.at(grad_sum_raw, ci_b, ang_rad  / r_i)
+        np.add.at(grad_cnt,     ci_b, 1)
+        np.add.at(kam_sum,      ci_b, ang_b)
+        np.add.at(r_sum,        ci_b, r_i)
+
+        key = round(r_i, 15)
+        reg_ang[key] = reg_ang.get(key, 0.0) + float(ang_rad.sum())
+        reg_cnt[key] = reg_cnt.get(key, 0)   + int(len(ang_rad))
+
+    with np.errstate(invalid='ignore', divide='ignore'):
+        mean_grad     = np.where(grad_cnt > 0, grad_sum / grad_cnt, np.nan)
+        mean_grad_raw = np.where(grad_cnt > 0, grad_sum_raw / grad_cnt, np.nan)
+        kam_deg       = np.where(grad_cnt > 0, kam_sum / grad_cnt, np.nan)
+
+    rho_pixel     = (2.0 / (alpha * b_m)) * mean_grad
+    rho_pixel_raw = (2.0 / (alpha * b_m)) * mean_grad_raw
+
+    L_eff = float(np.nansum(r_sum) / max(1, int(grad_cnt.sum())))
+    frac_excl = float(excl_thresh.sum()) / max(1, int(total_pairs.sum()))
+    frac_used = float((grad_cnt > 0).sum()) / max(1, N)
+
+    # Apparent GND from the noise floor alone at this L_eff
+    noise_only_rho = float((2.0 / (alpha * b_m)) * (noise_rad / L_eff)) if (noise_rad > 0 and L_eff > 0) else 0.0
+
+    # ── Regression method: mean Δθ(r) vs r → slope dθ/du ──────────────────────
+    regression = None
+    if len(reg_cnt) >= 2:
+        dists = np.array(sorted(reg_ang.keys()))
+        mean_dtheta = np.array([reg_ang[d] / reg_cnt[d] for d in dists])  # rad
+        A = np.vstack([dists, np.ones_like(dists)]).T
+        slope, intercept = np.linalg.lstsq(A, mean_dtheta, rcond=None)[0]
+        rho_reg = float((2.0 / (alpha * b_m)) * slope) if slope > 0 else 0.0
+        regression = {
+            "distances_m": dists,
+            "mean_dtheta_rad": mean_dtheta,
+            "slope_rad_per_m": float(slope),
+            "intercept_rad": float(intercept),
+            "rho": rho_reg,
+        }
+
+    return {
+        "rho_pixel": rho_pixel,
+        "rho_pixel_raw": rho_pixel_raw,
+        "kam_deg": kam_deg,
+        "n_used": grad_cnt,
+        "L_eff_m": L_eff,
+        "frac_excluded_threshold": frac_excl,
+        "frac_pixels_used": frac_used,
+        "regression": regression,
+        "noise_only_rho": noise_only_rho,
+        "step_x_um": step_x, "step_y_um": step_y,
+    }
+
+
 # ── Grain segmentation from pixel map ────────────────────────────────────────
 
 def segment_grains(df: pd.DataFrame,
