@@ -1031,6 +1031,18 @@ Common causes of GND / dislocation-density mismatch between tools:
                     index=0,
                     key=f"ipf3d_roll_{fname}",
                 )
+                equal_aspect_3d = st.checkbox(
+                    "Undistorted cube (equal edges)",
+                    value=True,
+                    help=(
+                        "On (default): the cube is drawn with equal on-screen "
+                        "edges so it is not stretched; the true physical extents "
+                        "are shown on the X and Y labels. Off: edges are drawn in "
+                        "physical proportion (X:Y) and a single common-length "
+                        "scale bar (same µm on every axis) is added."
+                    ),
+                    key=f"ipf3d_equal_{fname}",
+                )
                 with st.spinner("Rendering 3-D IPF cube... (may take ~20 s for large files)"):
                     # Align Euler and position arrays
                     work = df[[e1_col, e2_col, e3_col, x_col_3d, y_col_3d]].dropna()
@@ -1042,6 +1054,7 @@ Common causes of GND / dislocation-density mismatch between tools:
                         work[y_col_3d].values,
                         title=f"IPF Color Map — {phase_lbl} (3-D)",
                         phase_label=phase_lbl,
+                        equal_aspect=equal_aspect_3d,
                     )
                 st.pyplot(fig_3d)
                 st_figure_download(fig_3d, f"ipf_3d_cube_{fname.rsplit('.',1)[0]}",
@@ -1050,7 +1063,11 @@ Common causes of GND / dislocation-density mismatch between tools:
                 st.caption(
                     "Face colors encode crystal orientation relative to each sample axis "
                     "(001 = red · 101 = green · 111 = blue). "
-                    "Top face = IPF-Z, front face = IPF-Y, right face = IPF-X."
+                    "Top face = IPF-Z, front face = IPF-Y, right face = IPF-X. "
+                    "The **Undistorted cube** option (default on) draws equal on-screen "
+                    "edges so the box is not stretched; the true physical extents are "
+                    "printed on the X/Y labels. Turn it off to draw the box in physical "
+                    "proportion (X:Y) with a common-length scale bar (same µm on every axis)."
                 )
 
             st.divider()

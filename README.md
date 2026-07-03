@@ -13,6 +13,7 @@ A local Streamlit app for EBSD (Electron Backscatter Diffraction) data analysis.
 | **Texture** | Euler angle distributions, ideal orientation fractions (Cube, Goss, Brass, Gamma fiber), Φ vs φ₂ ODF section |
 | **Outliers** | IQR / Z-score / Modified Z-score detection with boxplots and outlier row table |
 | **KAM / IQ** | KAM distribution, Image Quality histogram, GND density estimate with method/assumptions and discrepancy diagnostics |
+| **3D IPF cube** | Isometric IPF map on three faces (top = IPF-Z, front = IPF-Y, right = IPF-X). *Undistorted cube* (default) draws equal on-screen edges — the true µm extents are printed on the X/Y labels; toggle it off for physical X:Y proportion with a common-length scale bar (same µm on every axis) |
 | **Reference workbook** | Optional `.xlsx/.xlsm` EBSD export (AztecCrystal/ESPRIT) for step-size calibration and cross-checking grain/boundary/texture stats |
 | **Export** | All figures as ZIP (PNG/SVG/PDF at 300 dpi) + individual downloads + stats CSV |
 

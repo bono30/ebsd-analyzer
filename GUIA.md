@@ -19,6 +19,13 @@ arquivo exportado do microscópio e o app gera automaticamente:
 - Figuras prontas para publicação (PNG/SVG/PDF, 300 dpi)
 - Visualizações **IPF** (mapa, triângulo, cubo 3D) e **figuras de polo (PF)**
 
+> **Cubo 3D — proporção de exibição.** Por padrão o cubo é desenhado com arestas
+> iguais na tela (*Undistorted cube*), para não aparecer esticado; as dimensões
+> físicas reais são mostradas nos rótulos dos eixos X/Y. Desmarque a opção para
+> desenhar o cubo na proporção física (X:Y), com uma barra de escala de mesmo
+> comprimento (mesmo valor em µm em todos os eixos). Rótulos dos eixos, chave de
+> eixos da amostra e identificação das faces ficam **fora** do cubo.
+
 ---
 
 ## 2. Link público
