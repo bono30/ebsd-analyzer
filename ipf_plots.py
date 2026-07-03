@@ -58,22 +58,51 @@ def euler_to_crystal_direction(phi1_arr, Phi_arr, phi2_arr, sample_axis="Z"):
     For each pixel/grain, rotate the given sample axis into the crystal frame.
     Returns unit vectors in crystal coordinates, shape (N, 3).
 
-    g_crystal = R · v_sample
-    R is the orientation matrix (crystal → sample), so we use R^T = R^-1
-    to go sample → crystal.
+    For Oxford/HKL CTF Euler angles ("Euler angles refer to Sample Coordinate
+    system"), the convention that matches standard Channel5/MTEX-style IPF
+    plots for this app is obtained by applying the Bunge matrix directly to
+    the sample direction.  Earlier versions used ``R.T`` here, which rotates
+    the direction into the wrong sector for inverse pole figures and moves the
+    X/Y/Z maxima to the wrong corners of the IPF triangle.
     """
     R = _euler_to_matrix_vec(np.asarray(phi1_arr, float),
                               np.asarray(Phi_arr,  float),
                               np.asarray(phi2_arr, float))  # (N,3,3)
     v = _SAMPLE_AXES[sample_axis.upper()]                   # (3,)
-    # crystal direction = R^T · v  →  einsum 'nij,j->ni'
-    cryst = np.einsum('nji,j->ni', R, v)                    # (N,3) — R^T via swapped indices
+    # CTF/IPF convention: crystal direction parallel to sample axis.
+    cryst = np.einsum('nij,j->ni', R, v)                    # (N,3)
     # Normalise
     norms = np.linalg.norm(cryst, axis=1, keepdims=True)
     cryst = cryst / np.where(norms > 0, norms, 1.0)
     # Map to upper hemisphere (all z ≥ 0 by convention)
     cryst[cryst[:, 2] < 0] *= -1
     return cryst
+
+
+def reduce_cubic_to_ipf_fz(xyz):
+    """
+    Reduce crystal directions to the cubic inverse-pole-figure fundamental
+    sector bounded by (001), (101) and (111).
+
+    For cubic symmetry, sign changes and permutations are equivalent.  The
+    standard IPF triangle uses directions [h k l] with 0 <= k <= h <= l:
+
+        (001): h=0, k=0, l=1
+        (101): h=1, k=0, l=1
+        (111): h=1, k=1, l=1
+
+    Therefore the sorted absolute components [low, mid, high] must be mapped
+    to [h, k, l] = [mid, low, high].  A previous implementation projected
+    unreduced directions for density plots, which produced inverse pole
+    figures that did not match EBSD reference software.
+    """
+    arr = np.asarray(xyz, dtype=float)
+    if arr.ndim == 1:
+        arr = arr.reshape(1, 3)
+    comps = np.sort(np.abs(arr), axis=1)  # low, mid, high
+    reduced = np.stack([comps[:, 1], comps[:, 0], comps[:, 2]], axis=1)
+    norms = np.linalg.norm(reduced, axis=1, keepdims=True)
+    return reduced / np.where(norms > 0, norms, 1.0)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -107,16 +136,26 @@ _P101 = _sp(_C101)   # (sqrt2/(1+sqrt2/sqrt2), 0) ≈ (0.414, 0)
 _P111 = _sp(_C111)   # both coords equal
 
 # Pre-compute triangle boundary for masking
-def _in_fundamental_triangle(x2d, y2d):
+def _in_fundamental_triangle(x2d, y2d, expand=0.0):
     """
     Return boolean mask: True if the stereographic point lies inside the
     BCC fundamental triangle (001)-(101)-(111).
+
+    ``expand`` slightly grows the triangle outward from its centroid (in the
+    same units as the stereographic coords). A tiny positive value lets the
+    filled color reach fully under the drawn boundary line so no white sliver
+    is left at the edges.
     """
     # Three edges defined by great circles; approximate using barycentric coords
-    # Vertices:
-    v0 = np.array(_P001)
-    v1 = np.array(_P101)
-    v2 = np.array(_P111)
+    # Vertices (optionally pushed outward from the centroid):
+    v0 = np.array(_P001, float)
+    v1 = np.array(_P101, float)
+    v2 = np.array(_P111, float)
+    if expand:
+        cen = (v0 + v1 + v2) / 3.0
+        v0 = cen + (v0 - cen) * (1.0 + expand)
+        v1 = cen + (v1 - cen) * (1.0 + expand)
+        v2 = cen + (v2 - cen) * (1.0 + expand)
 
     def sign(p, a, b):
         return (p[0]-b[0])*(a[1]-b[1]) - (a[0]-b[0])*(p[1]-b[1])
@@ -224,10 +263,14 @@ def _compute_mud(x2d, y2d, grid_size=256, sigma_frac=0.03):
     H_smooth = gaussian_filter(H, sigma=sigma)
 
     # MUD = observed density / expected uniform density
-    # Expected count per cell = n_total / (number of cells inside triangle)
-    # Approximate: use total cells as denominator for simplicity
-    total_cells = grid_size * grid_size
-    uniform_count_per_cell = n_total / total_cells
+    # Expected count per cell = n_total / (number of cells inside the IPF
+    # triangle).  Using all square-grid cells overstates MUD maxima because
+    # most cells lie outside the triangular fundamental zone.
+    gx = np.linspace(xmin, xmax, grid_size)
+    gy = np.linspace(ymin, ymax, grid_size)
+    GX, GY = np.meshgrid(gx, gy)
+    inside_cells = int(np.count_nonzero(_in_fundamental_triangle(GX.ravel(), GY.ravel())))
+    uniform_count_per_cell = n_total / max(inside_cells, 1)
     with np.errstate(invalid='ignore', divide='ignore'):
         mud = H_smooth / (uniform_count_per_cell + 1e-9)
 
@@ -297,8 +340,10 @@ def plot_ipf_density(phi1_arr, Phi_arr, phi2_arr,
     phi1, Phi, phi2 = phi1[valid], Phi[valid], phi2[valid]
 
     for ax, sample_axis in zip(axs, axes):
-        # 1. Crystal directions
-        cryst = euler_to_crystal_direction(phi1, Phi, phi2, sample_axis)
+        # 1. Crystal directions reduced to the cubic IPF fundamental triangle
+        cryst = reduce_cubic_to_ipf_fz(
+            euler_to_crystal_direction(phi1, Phi, phi2, sample_axis)
+        )
 
         # 2. Stereographic projection
         x2d, y2d = stereographic_projection(cryst)
@@ -385,9 +430,14 @@ def plot_ipf_legend(ax=None, title="", fontsize=9):
     else:
         fig = ax.get_figure()
 
-    # Sample a dense grid of stereographic points inside the triangle
-    gx = np.linspace(_P001[0] - 0.01, _P111[0] + 0.02, 300)
-    gy = np.linspace(_P001[1] - 0.01, _P111[1] + 0.02, 300)
+    # Sample a dense grid covering ALL three corners (101 is the widest in x,
+    # 111 is the tallest in y). Padding a little past each corner guarantees the
+    # bilinear-interpolated fill reaches the triangle edges with no white sliver.
+    pad = 0.02
+    x_corners = [_P001[0], _P101[0], _P111[0]]
+    y_corners = [_P001[1], _P101[1], _P111[1]]
+    gx = np.linspace(min(x_corners) - pad, max(x_corners) + pad, 400)
+    gy = np.linspace(min(y_corners) - pad, max(y_corners) + pad, 400)
     GX, GY = np.meshgrid(gx, gy)
     pts2d = np.stack([GX.ravel(), GY.ravel()], axis=1)
 
@@ -405,8 +455,8 @@ def plot_ipf_legend(ax=None, title="", fontsize=9):
     # IPF colors
     rgb = ipf_color_bcc(xyz)
 
-    # Mask to triangle
-    in_tri = _in_fundamental_triangle(pts2d[:, 0], pts2d[:, 1])
+    # Mask to triangle (expand a hair so color fills under the border line)
+    in_tri = _in_fundamental_triangle(pts2d[:, 0], pts2d[:, 1], expand=0.015)
     img_r = np.where(in_tri, rgb[:, 0], np.nan)
     img_g = np.where(in_tri, rgb[:, 1], np.nan)
     img_b = np.where(in_tri, rgb[:, 2], np.nan)
@@ -414,10 +464,10 @@ def plot_ipf_legend(ax=None, title="", fontsize=9):
     # Combine to RGBA
     alpha = np.where(in_tri, 1.0, 0.0)
     img = np.stack([
-        img_r.reshape(300, 300),
-        img_g.reshape(300, 300),
-        img_b.reshape(300, 300),
-        alpha.reshape(300, 300),
+        img_r.reshape(400, 400),
+        img_g.reshape(400, 400),
+        img_b.reshape(400, 400),
+        alpha.reshape(400, 400),
     ], axis=-1)
     img = np.nan_to_num(img, nan=0.0)
 
@@ -438,10 +488,23 @@ def plot_ipf_3d_cube(phi1_arr, Phi_arr, phi2_arr,
                      x_pos, y_pos,
                      step_x=None, step_y=None,
                      title="IPF Color Map — 3D",
-                     phase_label="Ferrite"):
+                     phase_label="Ferrite",
+                     equal_aspect=True):
     """
     3-D isometric cube — clean IPF faces, no internal diagonal lines,
-    proportional faces, scale bars per face, axis labels outside the cube.
+    axis labels drawn OUTSIDE the cube, and a sample-axes key that matches
+    the isometric view directions.
+
+    Parameters
+    ----------
+    equal_aspect : bool, default True
+        If True the cube is drawn as a visually undistorted cube (all three
+        edges the same length on screen) regardless of the map's physical
+        aspect ratio; the true physical extents are reported in the axis
+        labels. This is the scientifically clearest default for a map whose
+        X and Y spans differ a lot. If False the cube edges are drawn in
+        physical proportion (X:Y), and a single common-length scale bar (same
+        µm value on every axis) is added.
     """
     from scipy.ndimage import map_coordinates
 
@@ -488,31 +551,33 @@ def plot_ipf_3d_cube(phi1_arr, Phi_arr, phi2_arr,
     img_x = make_img(compute_ipf_colormap(phi1,Phi,phi2,"X"), yi,xi,H,W)
 
     # ── Isometric geometry ────────────────────────────────────────────────────
-    # Canvas pixels per map-pixel
+    # Edge lengths (canvas pixels) along each cube axis.
     SCALE = 4
-    FW = W * SCALE    # face width  (X direction, horizontal)
-    FH = H * SCALE    # face height (Y direction, depth)
-    FZ = H * SCALE    # face height (Z direction, vertical) — use H for square faces
-    # NOTE: all three faces share the same Z height. X-face width = FH (depth),
-    # front-face width = FW (X). This makes the cube proportional.
+    if equal_aspect:
+        # Visually undistorted cube: every edge the same on-screen length.
+        EDGE = SCALE * max(W, H)
+        LX = LY = LZ = float(EDGE)
+    else:
+        # Physical proportion: X:Y match the map; Z reuses the Y edge length.
+        LX = float(W * SCALE)   # X edge (front width)
+        LY = float(H * SCALE)   # Y edge (depth)
+        LZ = float(H * SCALE)   # Z edge (height)
 
     a30 = np.radians(30)
-    # Per-pixel isometric unit vectors (canvas pixels, y=down)
-    # Moving +1 in X → right-down
-    # Moving +1 in Y → left-down (depth)
-    # Moving +1 in Z → straight up
-    uX = np.array([ np.cos(a30),  np.sin(a30)]) * SCALE
-    uY = np.array([-np.cos(a30),  np.sin(a30)]) * SCALE
-    uZ = np.array([ 0.0,         -1.0         ]) * SCALE
+    # Full-edge isometric vectors (canvas pixels, y=down):
+    #   +X → right-down,  +Y → left-down (depth),  +Z → straight up.
+    EX = np.array([ np.cos(a30),  np.sin(a30)]) * LX
+    EY = np.array([-np.cos(a30),  np.sin(a30)]) * LY
+    EZ = np.array([ 0.0,         -1.0         ]) * LZ
 
-    def P(nx, ny, nz):
-        """Cube coordinate (nx cols, ny rows, nz Z-units) → canvas pixel."""
-        return nx*uX + ny*uY + nz*uZ
+    def P(fx, fy, fz):
+        """Fractional cube coordinate (each in [0,1]) → canvas pixel."""
+        return fx*EX + fy*EY + fz*EZ
 
-    # Raw corners
+    # Raw corners (fractional along each edge)
     raw_corners = {
-        "BLF": P(0,H,0), "BRF": P(W,H,0), "BLB": P(0,0,0), "BRB": P(W,0,0),
-        "TLF": P(0,H,H), "TRF": P(W,H,H), "TLB": P(0,0,H), "TRB": P(W,0,H),
+        "BLF": P(0,1,0), "BRF": P(1,1,0), "BLB": P(0,0,0), "BRB": P(1,0,0),
+        "TLF": P(0,1,1), "TRF": P(1,1,1), "TLB": P(0,0,1), "TRB": P(1,0,1),
     }
     all_pts = np.array(list(raw_corners.values()))
     PAD = 24
@@ -599,8 +664,8 @@ def plot_ipf_3d_cube(phi1_arr, Phi_arr, phi2_arr,
                       fill=col8, width=bar_thickness)
         return np.array(img_pil).astype(np.float32)/255.0
 
-    # Compute nice round scale bar length (~20% of face width, rounded)
-    def nice_bar(total_um, frac=0.20):
+    # Compute a nice round scale bar length in µm (~25% of the given span)
+    def nice_bar(total_um, frac=0.25):
         raw = total_um * frac
         mag = 10**np.floor(np.log10(raw))
         for m in [1,2,5,10]:
@@ -610,43 +675,45 @@ def plot_ipf_3d_cube(phi1_arr, Phi_arr, phi2_arr,
 
     X_um = W * sx * ds
     Y_um = H * sy * ds
-    bar_x_um  = nice_bar(X_um)
-    bar_y_um  = nice_bar(Y_um)
-    bar_z_um  = nice_bar(Y_um)   # Z height uses same physical scale as Y
 
-    # Scale bar pixel lengths
-    bar_x_px = bar_x_um / X_um * FW          # pixels along X direction
-    bar_y_px = bar_y_um / Y_um * FH          # pixels along Y direction
-    bar_z_px = bar_z_um / Y_um * FZ          # pixels along Z direction
+    # Physical pixels-per-µm along each drawn edge (differ when equal_aspect).
+    ppu_x = LX / X_um
+    ppu_y = LY / Y_um
+    ppu_z = LZ / Y_um   # Z is a projection direction, not a physical depth
 
-    # Positions for scale bars (placed near bottom of each face, offset inward)
-    OFF = 10   # pixels from edge
+    # Scale bars are only meaningful when the cube is in physical proportion.
+    # We use ONE common µm value on all three axes ("same scale convention"),
+    # which — because EBSD grids are square (sx≈sy) — renders as the same
+    # visible length on every face. In equal-aspect (normalized) mode we omit
+    # the bars and report the true physical extents in the axis labels instead.
+    scalebar_um = None
+    if not equal_aspect:
+        scalebar_um = nice_bar(max(X_um, Y_um))
 
-    # ── Front face scale bar (along X, horizontal-ish) ────────────────────────
-    # Place near bottom of front face, left side
-    sb_fx_start = BLF + (BRF-BLF)*0.07 + (TLF-BLF)*0.08
-    bar_x_vec   = (BRF - BLF) / np.linalg.norm(BRF - BLF)
-    sb_fx_end   = sb_fx_start + bar_x_vec * bar_x_px * SCALE / FW * FW
-    # Correct: bar_x_px is already in canvas pixels (fraction of FW)
-    sb_fx_end   = sb_fx_start + bar_x_vec * (bar_x_um / X_um * FW)
+        # Front face bar (along +X), near the bottom-left of the front face
+        sb_fx_start = BLF + (BRF-BLF)*0.07 + (TLF-BLF)*0.08
+        bar_x_vec   = (BRF - BLF) / np.linalg.norm(BRF - BLF)
+        sb_fx_end   = sb_fx_start + bar_x_vec * (scalebar_um * ppu_x)
 
-    # ── Right face scale bar (along Y depth) ──────────────────────────────────
-    sb_ry_start = BRF + (BRB-BRF)*0.07 + (TRF-BRF)*0.08
-    bar_y_vec   = (BRB - BRF) / np.linalg.norm(BRB - BRF)
-    sb_ry_end   = sb_ry_start + bar_y_vec * (bar_y_um / Y_um * FH)
+        # Right face bar (along +Y depth)
+        sb_ry_start = BRF + (BRB-BRF)*0.07 + (TRF-BRF)*0.08
+        bar_y_vec   = (BRB - BRF) / np.linalg.norm(BRB - BRF)
+        sb_ry_end   = sb_ry_start + bar_y_vec * (scalebar_um * ppu_y)
 
-    # ── Top face scale bar (along X, near front edge) ─────────────────────────
-    sb_tx_start = TLF + (TRF-TLF)*0.07 + (TLB-TLF)*0.05
-    bar_tx_vec  = (TRF - TLF) / np.linalg.norm(TRF - TLF)
-    sb_tx_end   = sb_tx_start + bar_tx_vec * (bar_x_um / X_um * FW)
+        # Top face bar (along +X, near the front edge)
+        sb_tx_start = TLF + (TRF-TLF)*0.07 + (TLB-TLF)*0.05
+        bar_tx_vec  = (TRF - TLF) / np.linalg.norm(TRF - TLF)
+        sb_tx_end   = sb_tx_start + bar_tx_vec * (scalebar_um * ppu_x)
 
-    # Draw scale bars
-    for p0, p1 in [(sb_fx_start,sb_fx_end),(sb_ry_start,sb_ry_end),(sb_tx_start,sb_tx_end)]:
-        canvas = draw_scalebar_on_canvas(canvas, p0, p1, "", bar_thickness=2)
+        # Draw the three bars (thicker so they read clearly on the map)
+        for p0, p1 in [(sb_fx_start,sb_fx_end),
+                       (sb_ry_start,sb_ry_end),
+                       (sb_tx_start,sb_tx_end)]:
+            canvas = draw_scalebar_on_canvas(canvas, p0, p1, "", bar_thickness=4)
 
     # ── Figure ────────────────────────────────────────────────────────────────
     fig = plt.figure(figsize=(9, 8))
-    ax  = fig.add_axes([0.0, 0.03, 0.72, 0.93])
+    ax  = fig.add_axes([0.05, 0.03, 0.66, 0.93])
     ax.imshow(canvas, origin="upper", interpolation="nearest", aspect="equal")
     ax.axis("off")
     fig.patch.set_facecolor("white")
@@ -671,38 +738,20 @@ def plot_ipf_3d_cube(phi1_arr, Phi_arr, phi2_arr,
     for a,b in outer_edges:
         ax.plot([a[0],b[0]],[a[1],b[1]],**ekw)
 
-    # ── Scale bar labels (outside the face, near the bars) ───────────────────
-    sblkw = dict(fontsize=7, ha="center", va="center", zorder=12, color="black",
-                 bbox=dict(boxstyle="round,pad=0.15", fc="white", alpha=0.85, lw=0))
-    # Front face bar label
-    mid_fx = (sb_fx_start + sb_fx_end) / 2
-    perp_fx = np.array([-(sb_fx_end-sb_fx_start)[1],
-                          (sb_fx_end-sb_fx_start)[0]])
-    perp_fx /= (np.linalg.norm(perp_fx) + 1e-9)
-    ax.text(mid_fx[0]+perp_fx[0]*10, mid_fx[1]+perp_fx[1]*10,
-            f"{bar_x_um:.0f} µm", **sblkw)
-    # Right face bar label
-    mid_ry = (sb_ry_start + sb_ry_end) / 2
-    perp_ry = np.array([-(sb_ry_end-sb_ry_start)[1],
-                          (sb_ry_end-sb_ry_start)[0]])
-    perp_ry /= (np.linalg.norm(perp_ry) + 1e-9)
-    ax.text(mid_ry[0]+perp_ry[0]*10, mid_ry[1]+perp_ry[1]*10,
-            f"{bar_y_um:.0f} µm", **sblkw)
-    # Top face bar label
-    mid_tx = (sb_tx_start + sb_tx_end) / 2
-    perp_tx = np.array([-(sb_tx_end-sb_tx_start)[1],
-                          (sb_tx_end-sb_tx_start)[0]])
-    perp_tx /= (np.linalg.norm(perp_tx) + 1e-9)
-    ax.text(mid_tx[0]+perp_tx[0]*10, mid_tx[1]+perp_tx[1]*10,
-            f"{bar_x_um:.0f} µm", **sblkw)
-
-    # ── Face labels — inside each face, unobtrusive ───────────────────────────
-    flkw = dict(fontsize=8, ha="center", va="center", zorder=10,
-                color="white", fontweight="bold",
-                bbox=dict(boxstyle="round,pad=0.2", fc="black", alpha=0.45, lw=0))
-    tc = (TLB+TRB+TRF+TLF)/4;  ax.text(tc[0], tc[1], "IPF // Z", **flkw)
-    fcc= (BLF+BRF+TRF+TLF)/4;  ax.text(fcc[0],fcc[1],"IPF // Y", **flkw)
-    rc = (BRF+BRB+TRB+TRF)/4;  ax.text(rc[0], rc[1], "IPF // X", **flkw)
+    # ── Scale bar labels (only in physical mode; placed beside each bar) ──────
+    if not equal_aspect and scalebar_um is not None:
+        sblkw = dict(fontsize=8, ha="center", va="center", zorder=12,
+                     color="black", fontweight="bold",
+                     bbox=dict(boxstyle="round,pad=0.15", fc="white",
+                               alpha=0.85, lw=0))
+        for p0, p1 in [(sb_fx_start, sb_fx_end),
+                       (sb_ry_start, sb_ry_end),
+                       (sb_tx_start, sb_tx_end)]:
+            mid  = (p0 + p1) / 2
+            perp = np.array([-(p1-p0)[1], (p1-p0)[0]])
+            perp /= (np.linalg.norm(perp) + 1e-9)
+            ax.text(mid[0]+perp[0]*11, mid[1]+perp[1]*11,
+                    f"{scalebar_um:.0f} µm", **sblkw)
 
     # ── Axis labels — OUTSIDE the cube, with annotation arrows ───────────────
     akw = dict(fontsize=10, fontweight="bold", ha="center", va="center",
@@ -736,28 +785,61 @@ def plot_ipf_3d_cube(phi1_arr, Phi_arr, phi2_arr,
                 bbox=dict(boxstyle="round,pad=0.3",fc="white",ec="#ccc",alpha=0.95,lw=0.5))
 
     ax.set_title(title, fontsize=12, fontweight="bold", pad=10)
-    ax.set_xlim(-2, canvas_W + 2)
-    ax.set_ylim(canvas_H + 35, -2)   # extra room at bottom for X label
+    ax.set_xlim(-70, canvas_W + 2)
+    ax.set_ylim(canvas_H + 55, -2)   # extra room at bottom for labels/note
 
-    # ── Legend triangle ───────────────────────────────────────────────────────
+    # Short note clarifying the display aspect (kept OUTSIDE the cube, at the
+    # very bottom of the map axes).
+    if equal_aspect:
+        aspect_note = ("Cube drawn with equal edges (display-normalized); "
+                       "true extents are given on the X/Y labels.")
+    else:
+        aspect_note = ("Cube drawn in physical proportion (X:Y). "
+                       f"Scale bar = {scalebar_um:.0f} µm on every axis.")
+    ax.text(canvas_W/2, canvas_H + 48, aspect_note,
+            ha="center", va="bottom", fontsize=7, color="#444", zorder=12)
+
+    # ── Legend triangle (IPF color key) ───────────────────────────────────────
     ax_leg = fig.add_axes([0.72, 0.60, 0.25, 0.23])
-    plot_ipf_legend(ax=ax_leg, title=f"{phase_label}\n001", fontsize=8)
+    plot_ipf_legend(ax=ax_leg, title=str(phase_label), fontsize=8)
 
-    # ── Sample reference frame ────────────────────────────────────────────────
+    # ── Sample-axes key — matches the isometric view directions exactly ───────
+    # Reuse the same edge vectors that build the cube so the arrows point the
+    # same way. Canvas is y-down, so flip the y-component for this y-up axes.
     ax_ref = fig.add_axes([0.72, 0.35, 0.25, 0.20])
-    for tail, head, lbl, col in [
-        ((0.45,0.45),(0.92,0.45),"X","darkred"),
-        ((0.45,0.45),(0.45,0.92),"Y","#006600"),
-        ((0.45,0.45),(0.08,0.08),"Z","navy"),
-    ]:
-        ax_ref.annotate("", xy=head, xytext=tail,
-                        arrowprops=dict(arrowstyle="-|>", color=col, lw=1.5))
-        off = (np.array(head)-np.array(tail))*0.22
-        ax_ref.text(head[0]+off[0], head[1]+off[1], lbl,
-                    fontsize=10, fontweight="bold", color=col,
-                    ha="center", va="center")
-    ax_ref.set_xlim(-0.1,1.2); ax_ref.set_ylim(-0.1,1.2)
+    dX = np.array([ EX[0], -EX[1]]); dX /= np.linalg.norm(dX)
+    dY = np.array([ EY[0], -EY[1]]); dY /= np.linalg.norm(dY)
+    dZ = np.array([ EZ[0], -EZ[1]]); dZ /= np.linalg.norm(dZ)
+    origin = np.array([0.42, 0.40])
+    L = 0.42
+    for dvec, lbl, col in [(dX,"X","darkred"), (dY,"Y","#006600"), (dZ,"Z","navy")]:
+        head = origin + dvec * L
+        ax_ref.annotate("", xy=head, xytext=origin,
+                        arrowprops=dict(arrowstyle="-|>", color=col, lw=1.8))
+        lp = origin + dvec * (L + 0.14)
+        ax_ref.text(lp[0], lp[1], lbl, fontsize=10, fontweight="bold",
+                    color=col, ha="center", va="center")
+    ax_ref.set_xlim(-0.25, 1.15); ax_ref.set_ylim(-0.25, 1.15)
+    ax_ref.set_aspect("equal")
     ax_ref.axis("off")
-    ax_ref.set_title("Sample axes", fontsize=7, pad=2)
+    ax_ref.set_title("Sample axes (view)", fontsize=7, pad=2)
+
+    # ── Face-identity key — which IPF projection each face shows (OUTSIDE) ────
+    ax_key = fig.add_axes([0.72, 0.14, 0.25, 0.16])
+    ax_key.axis("off")
+    ax_key.set_title("Faces", fontsize=7, pad=2)
+    face_key = [
+        ("Top face",   "IPF ∥ Z", 1.00),
+        ("Front face", "IPF ∥ Y", 0.78),
+        ("Right face", "IPF ∥ X", 0.60),
+    ]
+    for i, (face, proj, shade) in enumerate(face_key):
+        yy = 0.80 - i * 0.32
+        ax_key.add_patch(plt.Rectangle((0.02, yy-0.09), 0.16, 0.18,
+                                       facecolor=(shade*0.6, shade*0.6, shade*0.6),
+                                       edgecolor="black", lw=0.5))
+        ax_key.text(0.24, yy, f"{face} = {proj}", fontsize=7.5,
+                    va="center", ha="left")
+    ax_key.set_xlim(0, 1); ax_key.set_ylim(0, 1)
 
     return fig

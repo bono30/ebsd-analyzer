@@ -12,8 +12,19 @@ A local Streamlit app for EBSD (Electron Backscatter Diffraction) data analysis.
 | **Misorientation** | LAGB/HAGB frequency bar chart, Mackenzie random-texture reference curve, fraction 15°–65° |
 | **Texture** | Euler angle distributions, ideal orientation fractions (Cube, Goss, Brass, Gamma fiber), Φ vs φ₂ ODF section |
 | **Outliers** | IQR / Z-score / Modified Z-score detection with boxplots and outlier row table |
-| **KAM / IQ** | KAM distribution, Image Quality histogram, GND density estimate (Kubin–Mortensen method) |
+| **KAM / IQ** | KAM distribution, Image Quality histogram, **KAM-derived apparent GND density** (distance-aware gradient with real neighbour distances, phase-aware Burgers vector, optional angular-noise floor and calibration α, regression method, sensitivity table + log-scale histogram) — clearly labelled a lower-bound proxy, not total dislocation density |
+| **3D IPF cube** | Isometric IPF map on three faces (top = IPF-Z, front = IPF-Y, right = IPF-X). *Undistorted cube* (default) draws equal on-screen edges — the true µm extents are printed on the X/Y labels; toggle it off for physical X:Y proportion with a common-length scale bar (same µm on every axis) |
+| **Reference workbook** | Optional `.xlsx/.xlsm` EBSD export (AztecCrystal/ESPRIT) for step-size calibration and cross-checking grain/boundary/texture stats |
 | **Export** | All figures as ZIP (PNG/SVG/PDF at 300 dpi) + individual downloads + stats CSV |
+
+### IPF convention
+
+For Oxford/HKL `.ctf` data, the app treats Euler angles as Bunge angles in
+degrees referenced to the sample coordinate system, excludes non-indexed pixels
+(`Phase = 0` and `Error != 0`), and reduces cubic directions into the standard
+inverse-pole-figure triangle `(001)`–`(101)`–`(111)`. This convention was chosen
+to match the X/Y/Z IPF density positions produced by common EBSD reference
+software.
 
 ---
 
@@ -50,6 +61,7 @@ Your browser opens at `http://localhost:8501`.
 | **CTF** | `.ctf` | Oxford Instruments / HKL Channel 5 | Direct upload — full header parsed automatically |
 | **BCF** | `.bcf` | Bruker Esprit EBSD | Binary container auto-extracted |
 | **CSV / TXT** | `.csv`, `.txt` | OIM, AztecCrystal, MTEX, any export | Configurable separator and decimal |
+| **Excel (reference)** | `.xlsx`, `.xlsm` | AztecCrystal / ESPRIT export workbook | Optional — calibration/cross-check only, not a raw map |
 
 ### CTF column mapping (auto-detected)
 
@@ -128,16 +140,60 @@ To regenerate the samples: `python generate_sample.py`.
 
 ---
 
-## GND Density Formula
+## KAM-derived apparent GND density
 
-The **Kernel Average Misorientation (KAM)** method uses the Kubin–Mortensen (2003) relation:
+> **This is not the total dislocation density.** The app reports an *apparent,
+> lower-bound* estimate of **geometrically necessary dislocations (GNDs)** resolved
+> by the KAM kernel. It **excludes statistically-stored dislocations (SSDs)** and is
+> strongly **method-dependent** (step size, kernel order, angular noise, clean-up,
+> grain-boundary / phase / quality filtering). Treat it as a *KAM-derived proxy*,
+> never as a measured total dislocation density.
 
-$$\rho_{GND} = \frac{2\,\theta_{KAM}}{u \cdot b}$$
+The **Kernel Average Misorientation (KAM)** method (Kubin–Mortensen 2003;
+Calcagnotto et al. 2010) is implemented with **real neighbour distances**:
+
+$$g_i = \frac{\Delta\theta_i}{r_i}, \qquad \rho_{GND}^{KAM} \approx \frac{2}{b}\,\overline{g_i} \;=\; \frac{2\,\theta_{KAM}}{b\,L_{eff}}$$
 
 Where:
-- θ_KAM = local misorientation in radians
-- u = 1.86 × step size (m)
-- b = Burgers vector (m): Fe BCC ≈ 0.248 nm, FCC ≈ 0.254 nm
+- Δθ_i = pair misorientation in **radians**; r_i = **true** centre→neighbour distance
+  in **metres** (axial `u`, diagonals `√2·u`, higher shells `2u`, `√5·u`, `2√2·u`).
+  Diagonals are **not** divided by `u` alone — this was the main earlier error.
+- L_eff = mean included neighbour distance (reported in the UI; usually **> u**), not the step size.
+- b = Burgers vector in **metres**, derived from the lattice parameter and crystal
+  structure: **BCC** `b = (√3/2)·a` (Fe ≈ 0.248 nm), **FCC** `b = a/√2`
+  (austenite ≈ 0.253–0.255 nm), **HCP** `b ≈ a`. Editable per phase.
+- α = **optional** user calibration factor in the denominator, **default 1 and disabled**.
+
+> **Optional calibration factor α.** The default simplified convention uses **no
+> additional calibration factor (α = 1)** — this is a convention, not a fixed
+> standard. α is an advanced, opt-in input (`ρ = 2θ/(α·b·L_eff)`, α in the
+> denominator: α>1 lowers ρ); the UI asks for a reference/justification. Older
+> workflows using **α ≈ 1.86** simply lower ρ by that factor.
+
+**Angular noise floor.** An optional θ_noise (default 0°; conventionally ~0.2–0.5° as
+an order-of-magnitude only) is subtracted per pair before the gradient — *absolute*
+`Δθ' = max(Δθ − θ_noise, 0)` or *rms* `Δθ' = √(max(Δθ² − θ_noise², 0))`. The tab shows
+raw vs noise-corrected ρ **and** the apparent ρ produced by the noise floor **alone**,
+so you can tell when the signal is noise-dominated.
+
+**Methods available:** *Neighbour-gradient* (distance-aware, default), *KAM-mean*
+(`ρ = 2θ/(α·b·L_eff)`), and *Regression-corrected* (fits mean Δθ vs distance and uses
+the slope dθ/du, whose intercept absorbs the noise offset). A **sensitivity table**
+(kernel/threshold/noise/α variants → mean/median/p10/p90/IQR, pixels used, pairs
+excluded) and a **log-scale per-pixel histogram** quantify the method-dependence. All
+estimates are a **lower bound** (resolved GNDs only; ignores SSDs). A note on the
+advanced **Nye-tensor / lattice-curvature** method (more defensible but still 2-D
+lower-bound) is included but not fully implemented.
+
+### Optional Excel reference workbook
+
+You can also upload an **EBSD export workbook** (`.xlsx` / `.xlsm`) from AztecCrystal
+or ESPRIT under **Reference workbook (optional)** in the sidebar. It is parsed for
+Overview metadata (step size, pixel count, raster, hit rate), Grain List statistics
+(incl. Mean/Maximum Orientation Spread), Boundary Statistics (LAGB/HAGB), pole-figure
+MUD peaks and Mackenzie summaries. It is used **only for calibration and cross-checking**
+— it never replaces the analysis of the uploaded EBSD map, and no GND value is taken
+from it (these exports do not contain one). See [`GUIA.md`](GUIA.md) §9 for details.
 
 ---
 
@@ -162,6 +218,7 @@ ebsd-analyzer/
 ├── ctf_processing.py         ← Grain segmentation, KAM, grain statistics
 ├── ipf_plots.py              ← IPF density / triangle / 3D cube plots
 ├── pf_plots.py               ← Pole figures and IPF 2D map
+├── excel_reference.py        ← Optional .xlsx/.xlsm reference-workbook parser
 ├── requirements.txt          ← Python package list
 ├── install.bat               ← Windows installer (creates venv)
 ├── run_app.bat               ← Windows launcher (uses venv)
