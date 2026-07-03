@@ -1199,23 +1199,43 @@ resolved by the kernel at this step are captured; SSDs are ignored.
         if not (e1_col and e2_col and e3_col):
             st.warning("Select the three Euler angle columns in the Column mapping panel above.")
         else:
-            phi1_ipf = df[e1_col].dropna().values
-            Phi_ipf  = df[e2_col].dropna().values
-            phi2_ipf = df[e3_col].dropna().values
-            # Align indices
-            valid_ipf = (np.isfinite(phi1_ipf) & np.isfinite(Phi_ipf) & np.isfinite(phi2_ipf))
-            phi1_ipf = phi1_ipf[valid_ipf]
-            Phi_ipf  = Phi_ipf[valid_ipf]
-            phi2_ipf = phi2_ipf[valid_ipf]
+            # IPF density should be computed from indexed points only.
+            # CTF files commonly store non-indexed pixels as Phase=0 with
+            # Euler=(0,0,0); including them creates artificial intensity near
+            # (001) and shifts the inverse pole figures away from EBSD
+            # reference software.
+            ipf_df = df.copy()
+            valid_ipf = (
+                np.isfinite(pd.to_numeric(ipf_df[e1_col], errors="coerce")) &
+                np.isfinite(pd.to_numeric(ipf_df[e2_col], errors="coerce")) &
+                np.isfinite(pd.to_numeric(ipf_df[e3_col], errors="coerce"))
+            )
+            if phase_col and phase_col in ipf_df.columns:
+                phase_num = pd.to_numeric(ipf_df[phase_col], errors="coerce")
+                valid_ipf &= phase_num.notna() & (phase_num != 0)
+            if ci_col and ci_col in ipf_df.columns and "error" in str(ci_col).lower():
+                err_num = pd.to_numeric(ipf_df[ci_col], errors="coerce")
+                valid_ipf &= err_num.fillna(0).eq(0)
+
+            ipf_df = ipf_df.loc[valid_ipf].copy()
+            phi1_ipf = pd.to_numeric(ipf_df[e1_col], errors="coerce").values
+            Phi_ipf  = pd.to_numeric(ipf_df[e2_col], errors="coerce").values
+            phi2_ipf = pd.to_numeric(ipf_df[e3_col], errors="coerce").values
 
             # Phase label
             phase_lbl = "Ferrite (BCC)"
-            if phase_col and phase_col in df.columns:
-                top_phase = df[phase_col].value_counts().idxmax()
+            if phase_col and phase_col in ipf_df.columns and not ipf_df.empty:
+                top_phase = ipf_df[phase_col].value_counts().idxmax()
                 phase_lbl = str(top_phase)
 
             # ── IPF settings ──────────────────────────────────────────────
             st.subheader("Inverse Pole Figures (IPF) — MUD Density")
+            if len(ipf_df) < len(df):
+                st.caption(
+                    f"IPF uses {len(ipf_df):,} indexed pixels "
+                    f"({len(ipf_df)/max(len(df),1):.1%} of the map); "
+                    "Phase=0/non-indexed and Error≠0 points are excluded."
+                )
             ipf_c1, ipf_c2, ipf_c3 = st.columns(3)
             with ipf_c1:
                 ipf_axes = st.multiselect(

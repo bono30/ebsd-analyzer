@@ -58,22 +58,51 @@ def euler_to_crystal_direction(phi1_arr, Phi_arr, phi2_arr, sample_axis="Z"):
     For each pixel/grain, rotate the given sample axis into the crystal frame.
     Returns unit vectors in crystal coordinates, shape (N, 3).
 
-    g_crystal = R · v_sample
-    R is the orientation matrix (crystal → sample), so we use R^T = R^-1
-    to go sample → crystal.
+    For Oxford/HKL CTF Euler angles ("Euler angles refer to Sample Coordinate
+    system"), the convention that matches standard Channel5/MTEX-style IPF
+    plots for this app is obtained by applying the Bunge matrix directly to
+    the sample direction.  Earlier versions used ``R.T`` here, which rotates
+    the direction into the wrong sector for inverse pole figures and moves the
+    X/Y/Z maxima to the wrong corners of the IPF triangle.
     """
     R = _euler_to_matrix_vec(np.asarray(phi1_arr, float),
                               np.asarray(Phi_arr,  float),
                               np.asarray(phi2_arr, float))  # (N,3,3)
     v = _SAMPLE_AXES[sample_axis.upper()]                   # (3,)
-    # crystal direction = R^T · v  →  einsum 'nij,j->ni'
-    cryst = np.einsum('nji,j->ni', R, v)                    # (N,3) — R^T via swapped indices
+    # CTF/IPF convention: crystal direction parallel to sample axis.
+    cryst = np.einsum('nij,j->ni', R, v)                    # (N,3)
     # Normalise
     norms = np.linalg.norm(cryst, axis=1, keepdims=True)
     cryst = cryst / np.where(norms > 0, norms, 1.0)
     # Map to upper hemisphere (all z ≥ 0 by convention)
     cryst[cryst[:, 2] < 0] *= -1
     return cryst
+
+
+def reduce_cubic_to_ipf_fz(xyz):
+    """
+    Reduce crystal directions to the cubic inverse-pole-figure fundamental
+    sector bounded by (001), (101) and (111).
+
+    For cubic symmetry, sign changes and permutations are equivalent.  The
+    standard IPF triangle uses directions [h k l] with 0 <= k <= h <= l:
+
+        (001): h=0, k=0, l=1
+        (101): h=1, k=0, l=1
+        (111): h=1, k=1, l=1
+
+    Therefore the sorted absolute components [low, mid, high] must be mapped
+    to [h, k, l] = [mid, low, high].  A previous implementation projected
+    unreduced directions for density plots, which produced inverse pole
+    figures that did not match EBSD reference software.
+    """
+    arr = np.asarray(xyz, dtype=float)
+    if arr.ndim == 1:
+        arr = arr.reshape(1, 3)
+    comps = np.sort(np.abs(arr), axis=1)  # low, mid, high
+    reduced = np.stack([comps[:, 1], comps[:, 0], comps[:, 2]], axis=1)
+    norms = np.linalg.norm(reduced, axis=1, keepdims=True)
+    return reduced / np.where(norms > 0, norms, 1.0)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -234,10 +263,14 @@ def _compute_mud(x2d, y2d, grid_size=256, sigma_frac=0.03):
     H_smooth = gaussian_filter(H, sigma=sigma)
 
     # MUD = observed density / expected uniform density
-    # Expected count per cell = n_total / (number of cells inside triangle)
-    # Approximate: use total cells as denominator for simplicity
-    total_cells = grid_size * grid_size
-    uniform_count_per_cell = n_total / total_cells
+    # Expected count per cell = n_total / (number of cells inside the IPF
+    # triangle).  Using all square-grid cells overstates MUD maxima because
+    # most cells lie outside the triangular fundamental zone.
+    gx = np.linspace(xmin, xmax, grid_size)
+    gy = np.linspace(ymin, ymax, grid_size)
+    GX, GY = np.meshgrid(gx, gy)
+    inside_cells = int(np.count_nonzero(_in_fundamental_triangle(GX.ravel(), GY.ravel())))
+    uniform_count_per_cell = n_total / max(inside_cells, 1)
     with np.errstate(invalid='ignore', divide='ignore'):
         mud = H_smooth / (uniform_count_per_cell + 1e-9)
 
@@ -307,8 +340,10 @@ def plot_ipf_density(phi1_arr, Phi_arr, phi2_arr,
     phi1, Phi, phi2 = phi1[valid], Phi[valid], phi2[valid]
 
     for ax, sample_axis in zip(axs, axes):
-        # 1. Crystal directions
-        cryst = euler_to_crystal_direction(phi1, Phi, phi2, sample_axis)
+        # 1. Crystal directions reduced to the cubic IPF fundamental triangle
+        cryst = reduce_cubic_to_ipf_fz(
+            euler_to_crystal_direction(phi1, Phi, phi2, sample_axis)
+        )
 
         # 2. Stereographic projection
         x2d, y2d = stereographic_projection(cryst)

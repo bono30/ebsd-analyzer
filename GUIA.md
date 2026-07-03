@@ -27,6 +27,12 @@ arquivo exportado do microscópio e o app gera automaticamente:
 > comprimento (mesmo valor em µm em todos os eixos). Rótulos dos eixos, chave de
 > eixos da amostra e identificação das faces ficam **fora** do cubo.
 
+> **Convenção das figuras IPF.** Para arquivos `.ctf` Oxford/HKL, o app usa os
+> ângulos de Euler de Bunge em graus no sistema da amostra, remove pixels não
+> indexados (`Phase = 0` e `Error != 0`) e reduz as direções cúbicas para o
+> triângulo padrão `(001)`–`(101)`–`(111)`. Essa convenção foi ajustada para
+> coincidir com as posições X/Y/Z esperadas em softwares de referência de EBSD.
+
 ---
 
 ## 2. Link público

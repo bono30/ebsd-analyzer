@@ -17,6 +17,15 @@ A local Streamlit app for EBSD (Electron Backscatter Diffraction) data analysis.
 | **Reference workbook** | Optional `.xlsx/.xlsm` EBSD export (AztecCrystal/ESPRIT) for step-size calibration and cross-checking grain/boundary/texture stats |
 | **Export** | All figures as ZIP (PNG/SVG/PDF at 300 dpi) + individual downloads + stats CSV |
 
+### IPF convention
+
+For Oxford/HKL `.ctf` data, the app treats Euler angles as Bunge angles in
+degrees referenced to the sample coordinate system, excludes non-indexed pixels
+(`Phase = 0` and `Error != 0`), and reduces cubic directions into the standard
+inverse-pole-figure triangle `(001)`–`(101)`–`(111)`. This convention was chosen
+to match the X/Y/Z IPF density positions produced by common EBSD reference
+software.
+
 ---
 
 ## Requirements
