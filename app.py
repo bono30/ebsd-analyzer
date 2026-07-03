@@ -268,8 +268,8 @@ if ref_upload is not None:
                 if grain_ref.get("phase_counts"):
                     st.caption("Grains per phase: " + ", ".join(
                         f"{k}: {v}" for k, v in grain_ref["phase_counts"].items()))
-                stats = grain_ref.get("stats", {})
-                if stats:
+                summary_stats = grain_ref.get("stats", {})
+                if summary_stats:
                     label_map = {
                         "area": "Area (µm²)", "ecd": "ECD (µm)",
                         "feret": "Max Feret (µm)", "perimeter": "Perimeter (µm)",
@@ -278,8 +278,8 @@ if ref_upload is not None:
                     }
                     srows = []
                     for key, lbl in label_map.items():
-                        if key in stats:
-                            s = stats[key]
+                        if key in summary_stats:
+                            s = summary_stats[key]
                             srows.append({
                                 "Attribute": lbl, "N": s["count"],
                                 "Mean": round(s["mean"], 4), "Median": round(s["median"], 4),
